@@ -1,1 +1,6 @@
-data/raw/ 
+# Raw source data
+data/raw/
+
+# Python generated files
+__pycache__/
+*.py[cod]
