@@ -8,13 +8,13 @@ The contract is based on the BattLeDIM 2018 SCADA datasets investigated during P
 
 ## Sensor Event Schema
 
-Each sensor measurement will be represented as an individual event.
+Each sensor measurement is represented as an individual event.
 
 Example:
 
 ```json
 {
-  "event_id": "n1_20180101T000000",
+  "event_id": "pressure_n1_20180101T000000",
   "event_time": "2018-01-01T00:00:00",
   "sensor_id": "n1",
   "sensor_type": "pressure",
@@ -33,6 +33,22 @@ Example:
 | `sensor_type` | Type of measurement represented by the event |
 | `value` | Numeric sensor measurement |
 | `unit` | Unit associated with the measurement |
+
+### Event ID Format
+
+The event identifier follows this structure:
+
+```text
+<sensor_type>_<sensor_id>_<timestamp>
+```
+
+Example:
+
+```text
+pressure_n1_20180101T000000
+```
+
+Including `sensor_type` prevents identifier collisions when the same network identifier appears in more than one measurement type.
 
 ## Supported Sensor Types
 
