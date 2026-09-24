@@ -3,6 +3,11 @@
 import time
 
 from src.data.battledim_loader import load_scada_dataset
+from src.streaming.kafka_producer import (
+    create_producer,
+    flush_producer,
+    publish_sensor_event,
+)
 
 
 SENSOR_UNITS = {
@@ -132,7 +137,20 @@ def create_timestamp_batch(datasets, row_index):
     return events
 
 
-def replay_sensor_data(max_timestamps=3, replay_delay_seconds=1.0):
+def publish_event_batch(producer, events):
+    """Publish one validated timestamp batch to Kafka."""
+
+    for event in events:
+        publish_sensor_event(producer, event)
+
+    flush_producer(producer)
+
+
+def replay_sensor_data(
+    max_timestamps=3,
+    replay_delay_seconds=1.0,
+    publish_to_kafka=False,
+):
     """Replay BattLeDIM measurements in chronological order."""
 
     if max_timestamps <= 0:
@@ -154,6 +172,8 @@ def replay_sensor_data(max_timestamps=3, replay_delay_seconds=1.0):
         available_timestamps,
     )
 
+    producer = create_producer() if publish_to_kafka else None
+
     for row_index in range(timestamps_to_replay):
         events = create_timestamp_batch(
             datasets,
@@ -174,6 +194,9 @@ def replay_sensor_data(max_timestamps=3, replay_delay_seconds=1.0):
                 f"Duplicate event ID detected in batch {row_index + 1}."
             )
 
+        if producer is not None:
+            publish_event_batch(producer, events)
+
         event_time = events[0]["event_time"]
 
         print(f"\nTimestamp batch {row_index + 1}")
@@ -181,6 +204,7 @@ def replay_sensor_data(max_timestamps=3, replay_delay_seconds=1.0):
         print(f"Total events: {len(events)}")
         print(f"All events valid: {all_events_valid}")
         print(f"Event IDs unique: {event_ids_unique}")
+        print(f"Published to Kafka: {producer is not None}")
         print(f"Example event: {events[0]}")
 
         # Do not wait after the final replayed batch.
@@ -189,11 +213,12 @@ def replay_sensor_data(max_timestamps=3, replay_delay_seconds=1.0):
 
 
 def main():
-    """Run a short BattLeDIM sensor replay demonstration."""
+    """Run a one-timestamp Kafka replay test."""
 
     replay_sensor_data(
-        max_timestamps=3,
-        replay_delay_seconds=1.0,
+        max_timestamps=1,
+        replay_delay_seconds=0,
+        publish_to_kafka=True,
     )
 
 
