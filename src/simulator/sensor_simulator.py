@@ -213,10 +213,10 @@ def replay_sensor_data(
 
 
 def main():
-    """Run a one-timestamp Kafka replay test."""
+    """Replay one hour of sensor data to Kafka."""
 
     replay_sensor_data(
-        max_timestamps=1,
+        max_timestamps=12,
         replay_delay_seconds=0,
         publish_to_kafka=True,
     )
