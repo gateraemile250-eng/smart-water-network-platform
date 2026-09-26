@@ -1,9 +1,17 @@
 # Raw source data
 data/raw/
 
+# Generated data and Spark runtime state
+data/lake/
+data/checkpoints/
+
 # Python virtual environment
 venv/
 
 # Python generated files
 __pycache__/
 *.py[cod]
+
+# Environment variables and secrets
+.env
+*.env

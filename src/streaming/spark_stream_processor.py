@@ -15,25 +15,26 @@ from pyspark.sql.functions import (
     when,
     window,
 )
-from pyspark.sql.types import (
-    DoubleType,
-    StringType,
-    StructField,
-    StructType,
-)
+from pyspark.sql.types import DoubleType, StringType, StructField, StructType
 
 
-KAFKA_BOOTSTRAP_SERVERS = os.getenv(
-    "KAFKA_BOOTSTRAP_SERVERS",
-    "localhost:9092",
-)
-SENSOR_TOPIC = os.getenv(
-    "SENSOR_TOPIC",
-    "water-sensor-events",
-)
+KAFKA_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+SENSOR_TOPIC = os.getenv("SENSOR_TOPIC", "water-sensor-events")
+
+POSTGRES_HOST = os.getenv("POSTGRES_HOST")
+POSTGRES_PORT = os.getenv("POSTGRES_PORT")
+POSTGRES_DB = os.getenv("POSTGRES_DB")
+POSTGRES_USER = os.getenv("POSTGRES_USER")
+POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD")
 
 WINDOW_DURATION = "15 minutes"
 WATERMARK_DELAY = "10 minutes"
+
+VALID_EVENTS_PATH = "data/lake/sensor_events"
+REJECTED_EVENTS_PATH = "data/lake/rejected_sensor_events"
+
+EVENT_CHECKPOINT_PATH = "data/checkpoints/events_archive"
+METRICS_CHECKPOINT_PATH = "data/checkpoints/metrics"
 
 SENSOR_UNITS = {
     "pressure": "m",
@@ -42,8 +43,7 @@ SENSOR_UNITS = {
     "demand": "L/h",
 }
 
-
-SENSOR_EVENT_SCHEMA = StructType(
+EVENT_SCHEMA = StructType(
     [
         StructField("event_id", StringType(), True),
         StructField("event_time", StringType(), True),
@@ -56,7 +56,7 @@ SENSOR_EVENT_SCHEMA = StructType(
 
 
 def create_spark_session():
-    """Create the Spark session used by the streaming processor."""
+    """Create the Spark session."""
 
     spark = (
         SparkSession.builder
@@ -67,145 +67,114 @@ def create_spark_session():
     )
 
     spark.sparkContext.setLogLevel("WARN")
-
     return spark
 
 
 def read_kafka_stream(spark):
-    """Read raw sensor messages from the Kafka topic."""
+    """Read sensor events from Kafka."""
 
     return (
         spark.readStream
         .format("kafka")
-        .option(
-            "kafka.bootstrap.servers",
-            KAFKA_BOOTSTRAP_SERVERS,
-        )
+        .option("kafka.bootstrap.servers", KAFKA_SERVERS)
         .option("subscribe", SENSOR_TOPIC)
         .option("startingOffsets", "earliest")
         .load()
     )
 
 
-def select_kafka_message_fields(kafka_stream):
-    """Select Kafka fields required for processing and traceability."""
+def parse_sensor_events(stream):
+    """Parse Kafka JSON messages and retain Kafka metadata."""
 
-    return kafka_stream.select(
-        col("key").cast("string").alias("message_key"),
-        col("value").cast("string").alias("message_value"),
-        col("partition"),
-        col("offset"),
-    )
-
-
-def parse_sensor_events(message_stream):
-    """Parse Kafka JSON values using the sensor-event schema."""
-
-    parsed_stream = message_stream.withColumn(
-        "event",
+    parsed = stream.select(
         from_json(
-            col("message_value"),
-            SENSOR_EVENT_SCHEMA,
-        ),
-    )
-
-    return parsed_stream.select(
-        col("event.event_id").alias("event_id"),
-        col("event.event_time").alias("event_time"),
-        col("event.sensor_id").alias("sensor_id"),
-        col("event.sensor_type").alias("sensor_type"),
-        col("event.value").alias("value"),
-        col("event.unit").alias("unit"),
-        col("message_key"),
+            col("value").cast("string"),
+            EVENT_SCHEMA,
+        ).alias("event"),
+        col("key").cast("string").alias("message_key"),
         col("partition"),
         col("offset"),
     )
 
-
-def convert_event_time(parsed_stream):
-    """Safely convert event time from text to Spark timestamp."""
-
-    return parsed_stream.withColumn(
-        "event_time",
-        try_to_timestamp(
-            col("event_time"),
-            lit("yyyy-MM-dd'T'HH:mm:ss"),
-        ),
+    return parsed.select(
+        "event.*",
+        "message_key",
+        "partition",
+        "offset",
     )
 
 
-def validate_sensor_events(timestamped_stream):
-    """Add structural validity status to each sensor event."""
+def validate_sensor_events(stream):
+    """Parse event time and add structural validation results."""
 
-    valid_sensor_types = list(SENSOR_UNITS)
+    stream = (
+        stream
+        .withColumn("raw_event_time", col("event_time"))
+        .withColumn(
+            "event_time",
+            try_to_timestamp(
+                col("event_time"),
+                lit("yyyy-MM-dd'T'HH:mm:ss"),
+            ),
+        )
+    )
 
     expected_unit = (
+        when(col("sensor_type") == "pressure", "m")
+        .when(col("sensor_type") == "flow", "m3/h")
+        .when(col("sensor_type") == "level", "m")
+        .when(col("sensor_type") == "demand", "L/h")
+    )
+
+    rejection_reason = (
         when(
-            col("sensor_type") == "pressure",
-            lit(SENSOR_UNITS["pressure"]),
+            col("event_id").isNull() | (col("event_id") == ""),
+            "missing_event_id",
+        )
+        .when(col("event_time").isNull(), "invalid_event_time")
+        .when(
+            col("sensor_id").isNull() | (col("sensor_id") == ""),
+            "missing_sensor_id",
         )
         .when(
-            col("sensor_type") == "flow",
-            lit(SENSOR_UNITS["flow"]),
+            col("sensor_type").isNull()
+            | ~col("sensor_type").isin(list(SENSOR_UNITS)),
+            "invalid_sensor_type",
         )
+        .when(col("value").isNull(), "missing_value")
         .when(
-            col("sensor_type") == "level",
-            lit(SENSOR_UNITS["level"]),
-        )
-        .when(
-            col("sensor_type") == "demand",
-            lit(SENSOR_UNITS["demand"]),
+            col("unit").isNull() | (col("unit") != expected_unit),
+            "invalid_unit",
         )
     )
-
-    is_valid = (
-        col("event_id").isNotNull()
-        & (col("event_id") != "")
-        & col("event_time").isNotNull()
-        & col("sensor_id").isNotNull()
-        & (col("sensor_id") != "")
-        & col("sensor_type").isin(valid_sensor_types)
-        & col("value").isNotNull()
-        & (col("unit") == expected_unit)
-    )
-
-    return timestamped_stream.withColumn(
-        "is_valid",
-        is_valid,
-    )
-
-
-def select_valid_events(validated_stream):
-    """Return events that pass structural validation."""
-
-    return validated_stream.filter(col("is_valid"))
-
-
-def select_invalid_events(validated_stream):
-    """Return events that fail structural validation."""
-
-    return validated_stream.filter(
-        ~col("is_valid") | col("is_valid").isNull()
-    )
-
-
-def calculate_window_metrics(valid_stream):
-    """Calculate event-time sensor metrics using fixed windows."""
 
     return (
-        valid_stream
-        .withWatermark(
-            "event_time",
-            WATERMARK_DELAY,
+        stream
+        .withColumn("rejection_reason", rejection_reason)
+        .withColumn(
+            "is_valid",
+            col("rejection_reason").isNull(),
         )
+    )
+
+
+def select_valid_events(stream):
+    """Return valid sensor events."""
+
+    return stream.filter(col("is_valid"))
+
+
+def calculate_window_metrics(stream):
+    """Calculate 15-minute sensor metrics."""
+
+    return (
+        stream
+        .withWatermark("event_time", WATERMARK_DELAY)
         .groupBy(
-            window(
-                col("event_time"),
-                WINDOW_DURATION,
-            ),
-            col("sensor_type"),
-            col("sensor_id"),
-            col("unit"),
+            window(col("event_time"), WINDOW_DURATION),
+            "sensor_id",
+            "sensor_type",
+            "unit",
         )
         .agg(
             count("*").alias("reading_count"),
@@ -213,45 +182,150 @@ def calculate_window_metrics(valid_stream):
             spark_min("value").alias("min_value"),
             spark_max("value").alias("max_value"),
         )
+        .select(
+            col("window.start").alias("window_start"),
+            col("window.end").alias("window_end"),
+            "sensor_id",
+            "sensor_type",
+            "unit",
+            "reading_count",
+            "avg_value",
+            "min_value",
+            "max_value",
+        )
     )
 
 
-def start_metrics_console_stream(metrics_stream):
-    """Process available events and display windowed metrics."""
+def write_event_batch(batch_df, batch_id):
+    """Store valid and rejected events as Parquet."""
 
-    return (
-        metrics_stream.writeStream
-        .format("console")
-        .outputMode("update")
-        .option("truncate", False)
-        .option("numRows", 50)
-        .trigger(availableNow=True)
-        .start()
+    valid = (
+        batch_df
+        .filter(col("is_valid"))
+        .select(
+            "event_id",
+            "event_time",
+            "sensor_id",
+            "sensor_type",
+            "value",
+            "unit",
+            "message_key",
+            "partition",
+            "offset",
+        )
     )
+
+    rejected = (
+        batch_df
+        .filter(~col("is_valid"))
+        .select(
+            "event_id",
+            "raw_event_time",
+            "sensor_id",
+            "sensor_type",
+            "value",
+            "unit",
+            "message_key",
+            "partition",
+            "offset",
+            "rejection_reason",
+        )
+    )
+
+    if not valid.isEmpty():
+        valid.write.mode("append").parquet(VALID_EVENTS_PATH)
+
+    if not rejected.isEmpty():
+        rejected.write.mode("append").parquet(REJECTED_EVENTS_PATH)
+
+    print(f"Parquet event batch {batch_id} persisted.")
+
+
+def validate_postgres_config():
+    """Verify required PostgreSQL settings."""
+
+    settings = {
+        "POSTGRES_HOST": POSTGRES_HOST,
+        "POSTGRES_PORT": POSTGRES_PORT,
+        "POSTGRES_DB": POSTGRES_DB,
+        "POSTGRES_USER": POSTGRES_USER,
+        "POSTGRES_PASSWORD": POSTGRES_PASSWORD,
+    }
+
+    missing = [name for name, value in settings.items() if not value]
+
+    if missing:
+        raise EnvironmentError(
+            "Missing PostgreSQL settings: " + ", ".join(missing)
+        )
+
+
+def write_metrics_batch(batch_df, batch_id):
+    """Write one metrics micro-batch to PostgreSQL staging."""
+
+    if batch_df.isEmpty():
+        return
+
+    jdbc_url = (
+        f"jdbc:postgresql://{POSTGRES_HOST}:"
+        f"{POSTGRES_PORT}/{POSTGRES_DB}"
+    )
+
+    (
+        batch_df.write
+        .format("jdbc")
+        .option("url", jdbc_url)
+        .option("dbtable", "sensor_metrics_15min_staging")
+        .option("user", POSTGRES_USER)
+        .option("password", POSTGRES_PASSWORD)
+        .option("driver", "org.postgresql.Driver")
+        .option("truncate", "true")
+        .mode("overwrite")
+        .save()
+    )
+
+    print(f"PostgreSQL staging batch {batch_id} persisted.")
 
 
 def main():
-    """Run the Kafka-to-Spark streaming processing pipeline."""
+    """Run the streaming pipeline."""
 
+    validate_postgres_config()
     spark = create_spark_session()
 
     try:
-        kafka_stream = read_kafka_stream(spark)
-        message_stream = select_kafka_message_fields(kafka_stream)
-        parsed_stream = parse_sensor_events(message_stream)
-        timestamped_stream = convert_event_time(parsed_stream)
-        validated_stream = validate_sensor_events(timestamped_stream)
-        valid_stream = select_valid_events(validated_stream)
+        events = read_kafka_stream(spark)
+        events = parse_sensor_events(events)
+        events = validate_sensor_events(events)
 
-        window_metrics_stream = calculate_window_metrics(
-            valid_stream
+        valid_events = select_valid_events(events)
+        metrics = calculate_window_metrics(valid_events)
+
+        event_query = (
+            events.writeStream
+            .foreachBatch(write_event_batch)
+            .option(
+                "checkpointLocation",
+                EVENT_CHECKPOINT_PATH,
+            )
+            .trigger(availableNow=True)
+            .start()
         )
 
-        query = start_metrics_console_stream(
-            window_metrics_stream
+        metrics_query = (
+            metrics.writeStream
+            .foreachBatch(write_metrics_batch)
+            .outputMode("update")
+            .option(
+                "checkpointLocation",
+                METRICS_CHECKPOINT_PATH,
+            )
+            .trigger(availableNow=True)
+            .start()
         )
 
-        query.awaitTermination()
+        event_query.awaitTermination()
+        metrics_query.awaitTermination()
 
     finally:
         spark.stop()

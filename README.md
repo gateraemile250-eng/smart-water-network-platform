@@ -14,8 +14,6 @@ The goal is to transform raw sensor measurements into validated, structured, and
 
 ## Architecture
 
-Current and planned core data flow:
-
 ```text
 BattLeDIM Historical SCADA Data
               │
@@ -28,14 +26,18 @@ BattLeDIM Historical SCADA Data
               ▼
    Spark Structured Streaming
               │
+        ┌─────┴─────┐
+        ▼           ▼
+     Parquet     PostgreSQL
+ Historical      / PostGIS
+   Storage        Serving
+        │           │
+        └─────┬─────┘
               ▼
- PostgreSQL / PostGIS + Parquet
-              │
-              ▼
-    Analytics / Dashboard / GIS
+     Analytics / GIS
 ```
 
-Apache Airflow will later orchestrate scheduled batch workflows.
+Apache Airflow will later orchestrate scheduled workflows.
 
 Selected components may be extended to AWS after the local platform has been implemented and validated.
 
@@ -43,48 +45,33 @@ Selected components may be extended to AWS after the local platform has been imp
 
 ## Current Implementation
 
-The current implementation provides a working local streaming pipeline:
+The current local pipeline supports:
 
-```text
-BattLeDIM SCADA
-      │
-      ▼
-Python Sensor Simulator
-      │
-      ▼
-Apache Kafka
-water-sensor-events
-      │
-      ▼
-Spark Structured Streaming
-      │
-      ├── JSON schema parsing
-      ├── event-time conversion
-      ├── structural validation
-      ├── watermark handling
-      └── 15-minute sensor metrics
-```
+- replay of historical BattLeDIM measurements as sensor events;
+- Kafka-based streaming ingestion;
+- Spark Structured Streaming processing;
+- explicit JSON schema parsing and structural validation;
+- event-time processing with a 10-minute watermark;
+- 15-minute sensor-level aggregations;
+- Parquet historical event storage;
+- Parquet rejected-event quarantine;
+- PostgreSQL serving-layer persistence;
+- PostgreSQL/PostGIS network and sensor reference data;
+- persistent Spark checkpoints for restart/resume behaviour.
 
-Historical BattLeDIM measurements are replayed as individual sensor events and published to Kafka as JSON messages.
+Current streaming metrics include reading count, average, minimum, and maximum values.
 
-Spark consumes the Kafka stream, applies an explicit event schema, safely converts event timestamps, validates event structure and units, and calculates event-time windowed metrics.
+A controlled one-hour replay processes **12 BattLeDIM timestamps × 119 sensors = 1,428 sensor events**.
 
-Current streaming metrics include:
-
-- reading count;
-- average value;
-- minimum value;
-- maximum value.
-
-Metrics are calculated per sensor using **15-minute tumbling windows** with a **10-minute event-time watermark**.
-
-This processing layer provides the foundation for later storage, operational analytics, and anomaly-detection logic.
+These events produce **476 sensor/window metric records** across four 15-minute windows.
 
 ---
 
 ## Data Source
 
-The initial implementation uses the **BattLeDIM 2018 dataset** and the **L-Town EPANET water-distribution network model**.
+The project uses the **BattLeDIM 2018 dataset** and the **L-Town EPANET water-distribution network model**.
+
+BattLeDIM provides a benchmark water-distribution network and sensor dataset. The L-Town network is a hypothetical benchmark network and should not be interpreted as a real Rwandan water network.
 
 | Measurement | Sensors | Unit |
 |---|---:|---|
@@ -97,7 +84,13 @@ The SCADA datasets contain **105,120 timestamps** at 5-minute intervals througho
 
 Each timestamp produces **119 sensor events**.
 
-BattLeDIM also provides leakage ground truth and network-topology information for later anomaly-detection evaluation and network-aware analysis.
+The network model contains:
+
+- 785 nodes;
+- 909 links;
+- 119 mapped sensors.
+
+BattLeDIM leakage ground truth is kept separate from the streaming detector inputs so that it can later support anomaly-detection evaluation.
 
 Raw source data is preserved unchanged and excluded from Git version control.
 
@@ -105,7 +98,7 @@ Raw source data is preserved unchanged and excluded from Git version control.
 
 ## Sensor Event Contract
 
-Kafka messages use a consistent sensor-event structure:
+Kafka messages use the following structure:
 
 ```text
 event_id
@@ -116,7 +109,7 @@ value
 unit
 ```
 
-Supported sensor types and units are:
+Supported sensor types and units:
 
 ```text
 pressure → m
@@ -137,9 +130,77 @@ Example:
 pressure:n1
 ```
 
-This keeps sensor identity explicit and supports sensor-level ordering when the topic is partitioned by key in future iterations.
-
 Structural data validation is kept separate from anomaly detection. A structurally valid measurement is not automatically considered normal, and an anomaly is not automatically considered a confirmed leak.
+
+---
+
+## Storage Architecture
+
+The platform separates storage responsibilities.
+
+### Parquet Historical Layer
+
+Structurally valid sensor events are written to:
+
+```text
+data/lake/sensor_events/
+```
+
+Rejected events are quarantined separately:
+
+```text
+data/lake/rejected_sensor_events/
+```
+
+The clean controlled replay produced **1,428 valid historical events** and zero rejected records.
+
+### PostgreSQL / PostGIS Serving Layer
+
+PostgreSQL stores:
+
+- sensor metadata;
+- network nodes;
+- network links;
+- 15-minute sensor metrics;
+- metric staging data.
+
+Validated reference-data counts:
+
+```text
+sensors          119
+network_nodes    785
+network_links    909
+```
+
+The controlled replay produced:
+
+```text
+metrics_staging  476
+metrics_serving  476
+```
+
+Metrics are merged from staging into the serving table using an idempotent PostgreSQL upsert procedure.
+
+PostGIS is enabled for future spatial analysis. Network geometry is retained without assigning an unsupported coordinate reference system until the source CRS is confirmed.
+
+---
+
+## Streaming Checkpoints
+
+Spark uses persistent checkpoints for its historical-event and metric queries:
+
+```text
+data/checkpoints/events_archive/
+data/checkpoints/metrics/
+```
+
+Checkpoint-based restart/resume behaviour has been validated.
+
+After processing the controlled 1,428-event replay, restarting Spark with the same checkpoints did not duplicate the historical Parquet records.
+
+This validation demonstrates checkpoint-based recovery behaviour in the current local implementation; it is not presented as a production exactly-once guarantee.
+
+Generated lake data and checkpoint state are excluded from Git.
 
 ---
 
@@ -147,66 +208,41 @@ Structural data validation is kept separate from anomaly detection. A structural
 
 ### Phase 1 — Project Design ✅
 
-Defined the business problem, target users, system outputs, initial anomaly-detection concept, technology responsibilities, and core platform architecture.
+Defined the business problem, target users, architecture, technology responsibilities, and initial anomaly-detection concept.
 
 ### Phase 2 — Data Acquisition & Understanding ✅
 
-Validated the BattLeDIM source data and L-Town network model.
-
-Key findings:
-
-- 105,120 timestamps per SCADA dataset;
-- complete 5-minute measurement sequence throughout 2018;
-- no missing or duplicate timestamps;
-- no missing sensor measurements;
-- all selected pressure, flow, level, and leakage identifiers mapped to the network topology;
-- streaming sensor-event data contract defined.
+Validated the BattLeDIM SCADA datasets and L-Town network topology, including timestamps, measurements, sensor mappings, leakage data, and the streaming event contract.
 
 ### Phase 3 — Python Sensor Simulator ✅
 
-Built a reusable simulator that converts historical SCADA measurements into chronological sensor events.
-
-The simulator provides deterministic event IDs, standardized sensor types and units, event-contract validation, batch-level uniqueness checks, configurable replay speed, and timestamp-by-timestamp processing.
+Built a reusable simulator that converts historical SCADA measurements into chronological sensor events with deterministic IDs and standardized units.
 
 ### Phase 4 — Apache Kafka Streaming Ingestion ✅
 
-Implemented Kafka as the streaming ingestion layer between the simulator and downstream processing.
+Implemented local Kafka ingestion, JSON serialization, sensor-based message keys, simulator integration, and consumer validation.
 
-Completed:
-
-- local Kafka deployment using Docker;
-- `water-sensor-events` topic;
-- reusable Python Kafka producer;
-- JSON event serialization;
-- sensor-based Kafka message keys;
-- simulator-to-Kafka integration;
-- validation consumer;
-- Kafka partition and offset verification.
-
-The development environment currently uses a **single Kafka broker and one topic partition** for local functional validation. It is not intended to represent a production fault-tolerant Kafka cluster.
+The development environment currently uses a **single Kafka broker and one topic partition** for functional validation.
 
 ### Phase 5 — Spark Structured Streaming ✅
 
-Implemented Spark Structured Streaming as the real-time processing layer.
+Implemented Kafka-to-Spark streaming, schema parsing, structural validation, event-time processing, watermarking, and 15-minute sensor metrics.
 
-Completed:
+Spark currently runs in **local mode inside a Docker container**.
 
-- containerized Spark 4.1.3 runtime;
-- Kafka-to-Spark integration;
-- explicit JSON schema parsing;
-- safe event-time conversion;
-- structural event validation;
-- separation of valid and rejected-event logic;
-- event-time watermarking;
-- 15-minute tumbling-window aggregation;
-- per-sensor count, average, minimum, and maximum metrics;
-- configurable Kafka bootstrap address;
-- reusable Spark launcher;
-- end-to-end validation from BattLeDIM replay through Kafka to Spark metrics.
+### Phase 6 — Persistent Storage ✅
 
-A clean integration test replayed **12 BattLeDIM timestamps**, producing **1,428 sensor events** and successfully generating event-time windowed metrics across pressure, flow, level, and demand measurements.
+Implemented:
 
-Spark currently runs in **local mode inside a Docker container**, and the console output is used as a development sink. Persistent streaming storage and durable checkpointing will be introduced when the storage layer is implemented.
+- PostgreSQL/PostGIS serving storage;
+- network and sensor reference-data loading;
+- composite sensor identity handling;
+- metric staging and idempotent upsert;
+- Parquet historical event storage;
+- rejected-event quarantine;
+- persistent Spark checkpoints;
+- end-to-end persistence validation;
+- shared Docker networking for Kafka, PostgreSQL, and Spark.
 
 ---
 
@@ -218,18 +254,20 @@ Spark currently runs in **local mode inside a Docker container**, and the consol
 - Pandas
 - Apache Kafka
 - Apache Spark Structured Streaming
+- PostgreSQL
+- PostGIS
+- Parquet
 - Docker
 
 ### Planned as requirements are introduced
 
-- PostgreSQL / PostGIS
-- Parquet
 - Apache Airflow
+- anomaly detection / machine learning
 - Power BI
-- GIS
-- AWS
+- GIS analytics
+- selected AWS services
 
-Machine learning, Hadoop, MongoDB, and WNTR will be introduced only if later requirements justify their use.
+Hadoop, MongoDB, and other technologies will be introduced only if later requirements justify their use.
 
 ---
 
@@ -245,34 +283,28 @@ Smart-water-network-platform/
 │
 ├── data/
 │   ├── raw/
-│   │   └── battledim/
-│   └── reference/
+│   ├── reference/
+│   ├── lake/
+│   └── checkpoints/
 │
 ├── infrastructure/
 │   ├── kafka/
 │   │   └── docker-compose.yml
+│   ├── postgres/
+│   │   ├── docker-compose.yml
+│   │   └── .env.example
 │   └── spark/
 │       └── run_spark_stream.cmd
 │
+├── sql/
+│   ├── 01_create_storage_schema.sql
+│   └── 02_upsert_sensor_metrics.sql
+│
 ├── src/
 │   ├── data/
-│   │   └── battledim_loader.py
-│   │
 │   ├── exploration/
-│   │   ├── inspect_battledim.py
-│   │   ├── analyze_sensor_measurements.py
-│   │   ├── plot_sensor_timeseries.py
-│   │   ├── analyze_leakages.py
-│   │   ├── assess_data_quality.py
-│   │   └── inspect_network_topology.py
-│   │
 │   ├── simulator/
-│   │   └── sensor_simulator.py
-│   │
 │   └── streaming/
-│       ├── kafka_producer.py
-│       ├── kafka_consumer.py
-│       └── spark_stream_processor.py
 │
 ├── .gitignore
 ├── requirements.txt
@@ -281,9 +313,35 @@ Smart-water-network-platform/
 
 ---
 
-## Running the Current Streaming Pipeline
+## Local Setup
 
-The current local workflow requires Docker and the Python environment configured for the project.
+The current implementation requires Python, Docker, and Docker Compose.
+
+Install Python dependencies:
+
+```cmd
+pip install -r requirements.txt
+```
+
+Create the PostgreSQL environment file from:
+
+```text
+infrastructure/postgres/.env.example
+```
+
+and provide the local database password in:
+
+```text
+infrastructure/postgres/.env
+```
+
+The real `.env` file is excluded from Git.
+
+Create the shared Docker network once:
+
+```cmd
+docker network create smart-water-network
+```
 
 Start Kafka:
 
@@ -291,19 +349,69 @@ Start Kafka:
 docker compose -f infrastructure\kafka\docker-compose.yml up -d
 ```
 
-Replay BattLeDIM sensor measurements to Kafka:
+Start PostgreSQL/PostGIS:
+
+```cmd
+docker compose --env-file infrastructure\postgres\.env -f infrastructure\postgres\docker-compose.yml up -d
+```
+
+Apply the storage schema:
+
+```cmd
+docker exec -i smart-water-postgres psql -U smart_water_user -d smart_water < sql\01_create_storage_schema.sql
+```
+
+Install the metric upsert procedure:
+
+```cmd
+docker exec -i smart-water-postgres psql -U smart_water_user -d smart_water < sql\02_upsert_sensor_metrics.sql
+```
+
+Load network and sensor reference data:
+
+```cmd
+python -m src.data.load_reference_data
+```
+
+Replay BattLeDIM measurements to Kafka:
 
 ```cmd
 python -m src.simulator.sensor_simulator
 ```
 
-Run the Spark streaming processor:
+Run Spark Structured Streaming:
 
 ```cmd
 infrastructure\spark\run_spark_stream.cmd
 ```
 
-The Spark processor consumes the Kafka events and displays event-time windowed sensor metrics.
+Merge staged metrics into the serving table:
+
+```cmd
+docker exec smart-water-postgres psql -U smart_water_user -d smart_water -c "CALL upsert_sensor_metrics();"
+```
+
+Workflow orchestration will be introduced later rather than embedding orchestration responsibilities directly into the Spark processor.
+
+---
+
+## Validation
+
+The controlled end-to-end pipeline has been validated with:
+
+```text
+Kafka sensor events       1,428
+Parquet historical events 1,428
+Sensors                     119
+Network nodes               785
+Network links               909
+15-minute metrics           476
+Rejected events               0
+```
+
+Representative pressure metrics for sensor `n1` were verified against the expected 15-minute calculations.
+
+The PostgreSQL upsert was also rerun without increasing the serving-table row count, validating idempotent metric persistence for the controlled replay.
 
 ---
 
@@ -321,8 +429,6 @@ The README provides the high-level project view while detailed technical finding
 
 ## Development Approach
 
-The platform is being developed incrementally:
-
 ```text
 Understand data
       ↓
@@ -334,7 +440,7 @@ Build streaming ingestion
       ↓
 Process streaming data
       ↓
-Store operational and historical data
+Persist operational and historical data
       ↓
 Detect potential anomalies
       ↓
@@ -349,11 +455,9 @@ Each technology is introduced only when it has a defined responsibility in the a
 
 ## Next Phase
 
-The next phase will introduce the **storage layer** for streaming and historical data.
+The next major platform capability will build on the validated streaming and storage foundation.
 
-The objective is to persist processed measurements and analytical outputs in formats suited to their responsibilities, with PostgreSQL/PostGIS and Parquet evaluated as the primary storage components.
-
-Storage design will be defined before implementation so that technologies are introduced based on data-access and operational requirements rather than added only for tool coverage.
+Upcoming work will introduce orchestration, anomaly-detection logic, analytics, GIS integration, testing, and selected cloud components incrementally rather than adding technologies without a defined requirement.
 
 ---
 
