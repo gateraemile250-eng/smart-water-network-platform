@@ -1,0 +1,147 @@
+services:
+  airflow-postgres:
+    image: postgres:16
+    container_name: smart-water-airflow-postgres
+
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+
+    volumes:
+      - smart_water_airflow_db:/var/lib/postgresql/data
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+    networks:
+      - airflow-internal
+
+
+  airflow-init:
+    image: apache/airflow:3.3.1
+    container_name: smart-water-airflow-init
+
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+
+    env_file:
+      - ../postgres/.env
+
+    environment: &airflow-environment
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
+      AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://smart-water-airflow-apiserver:8080/execution/
+      AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET}
+      AIRFLOW_CONN_SMART_WATER_DB: postgresql://smart_water_user:${POSTGRES_PASSWORD}@smart-water-postgres:5432/smart_water
+
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - airflow_logs:/opt/airflow/logs
+
+    command: db migrate
+
+    networks:
+      - airflow-internal
+      - smart-water-network
+
+
+  airflow-apiserver:
+    image: apache/airflow:3.3.1
+    container_name: smart-water-airflow-apiserver
+
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+
+    env_file:
+      - ../postgres/.env
+
+    environment:
+      <<: *airflow-environment
+
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - airflow_logs:/opt/airflow/logs
+
+    command: api-server
+
+    ports:
+      - "8081:8080"
+
+    networks:
+      - airflow-internal
+      - smart-water-network
+
+
+  airflow-scheduler:
+    image: apache/airflow:3.3.1
+    container_name: smart-water-airflow-scheduler
+
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+
+    env_file:
+      - ../postgres/.env
+
+    environment:
+      <<: *airflow-environment
+
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - airflow_logs:/opt/airflow/logs
+
+    command: scheduler
+
+    networks:
+      - airflow-internal
+      - smart-water-network
+
+
+  airflow-dag-processor:
+    image: apache/airflow:3.3.1
+    container_name: smart-water-airflow-dag-processor
+
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+
+    env_file:
+      - ../postgres/.env
+
+    environment:
+      <<: *airflow-environment
+
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - airflow_logs:/opt/airflow/logs
+
+    command: dag-processor
+
+    networks:
+      - airflow-internal
+      - smart-water-network
+
+
+volumes:
+  smart_water_airflow_db:
+  airflow_logs:
+
+
+networks:
+  airflow-internal:
+
+  smart-water-network:
+    external: true
