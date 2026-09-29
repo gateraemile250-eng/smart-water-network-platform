@@ -11,14 +11,17 @@ ENV_FILE = Path("infrastructure/postgres/.env")
 
 
 def get_database_connection():
-    """Create a PostgreSQL connection using local environment settings."""
+    """Create a PostgreSQL connection using environment settings."""
 
     if not ENV_FILE.exists():
         raise FileNotFoundError(
             f"Database environment file not found: {ENV_FILE}"
         )
 
-    load_dotenv(ENV_FILE, override=True)
+    # Load values from .env only when they are not already provided
+    # by the runtime environment. This allows Docker to override
+    # host and port while local development continues using .env.
+    load_dotenv(ENV_FILE, override=False)
 
     required_variables = [
         "POSTGRES_HOST",
