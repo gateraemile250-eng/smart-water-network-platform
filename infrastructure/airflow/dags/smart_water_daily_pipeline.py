@@ -14,8 +14,8 @@ PROJECT_PATH = r"C:\Users\USER\Documents\Smart-water-network-platform"
 with DAG(
     dag_id="smart_water_daily_pipeline",
     description=(
-        "Load, validate, and run network anomaly detection "
-        "for the Smart Water platform."
+        "Load, validate, detect anomalies, and localize "
+        "suspected network areas for the Smart Water platform."
     ),
     start_date=datetime(2026, 9, 28),
     schedule="@daily",
@@ -29,6 +29,7 @@ with DAG(
         "postgresql",
         "data-quality",
         "anomaly-detection",
+        "localization",
     ],
 ) as dag:
 
@@ -92,6 +93,42 @@ with DAG(
         """,
     )
 
+    run_localization = BashOperator(
+        task_id="run_localization",
+        bash_command=f"""
+            docker run --rm \
+            --network smart-water-network \
+            -v "{PROJECT_PATH}:/opt/project" \
+            -e POSTGRES_HOST=smart-water-postgres \
+            -e POSTGRES_PORT=5432 \
+            smart-water-ml \
+            python -m src.localization.localization_persistence
+        """,
+    )
+
+    validate_localization_results = SQLCheckOperator(
+        task_id="validate_localization_results",
+        conn_id="smart_water_db",
+        sql="""
+            SELECT
+                COUNT(*) > 0
+                AND COUNT(*) = COUNT(
+                    DISTINCT (timestamp, pipe_id)
+                )
+                AND COUNT(*) FILTER (
+                    WHERE localization_score IS NULL
+                ) = 0
+                AND COUNT(*) FILTER (
+                    WHERE localization_score < 0
+                ) = 0
+                AND COUNT(*) FILTER (
+                    WHERE candidate_rank < 1
+                       OR candidate_rank > 25
+                ) = 0
+            FROM network_localization_results;
+        """,
+    )
+
     (
         check_postgresql
         >> upsert_sensor_metrics
@@ -99,4 +136,6 @@ with DAG(
         >> validate_reference_data
         >> run_anomaly_detection
         >> validate_anomaly_results
+        >> run_localization
+        >> validate_localization_results
     )
