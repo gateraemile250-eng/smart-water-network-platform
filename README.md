@@ -1,224 +1,252 @@
 # Smart Water Network Intelligence Platform
+An end-to-end **data engineering, machine-learning, network analytics, and GIS platform** for processing water-distribution sensor data, detecting abnormal network behaviour, interpreting sensor evidence, ranking candidate network assets, and presenting operational intelligence through an interactive dashboard.
 
-## Overview
+> **Important:** This is a simulation/benchmark project. It uses the BattLeDIM 2018 / L-Town water-network dataset to simulate continuous sensor events. It is **not a live monitoring system for a real Rwandan water network**, and anomaly results must not be interpreted as confirmed leaks.
 
-The **Smart Water Network Intelligence Platform** is an end-to-end data engineering, machine-learning, and geospatial analytics project for processing water-distribution sensor data, detecting abnormal network behaviour, and identifying network areas that may require investigation.
+## Contents
 
-The platform uses historical **BattLeDIM / L-Town** water-network data to simulate continuous pressure, flow, tank-level, and demand measurements.
+1. [Project Overview](#1-project-overview)
+2. [Architecture](#2-architecture)
+3. [Data Source and Simulation Model](#3-data-source-and-simulation-model)
+4. [Streaming Data Pipeline](#4-streaming-data-pipeline)
+5. [Network Anomaly Detection](#5-network-anomaly-detection)
+6. [Interpretation, Localization and GIS](#6-interpretation-localization-and-gis)
+7. [Operational Analytics Dashboard](#7-operational-analytics-dashboard)
+8. [Airflow Orchestration](#8-airflow-orchestration)
+9. [End-to-End Validation](#9-end-to-end-validation)
+10. [Technology Stack](#10-technology-stack)
+11. [Project Structure](#11-project-structure)
+12. [Local Setup](#12-local-setup)
+13. [Engineering Principles](#13-engineering-principles)
+14. [Project Progress](#14-project-progress)
+15. [Current Capabilities](#15-current-capabilities)
+16. [Public Dashboard](#16-public-dashboard)
+17. [Reproducibility and Version Control](#17-reproducibility-and-version-control)
+18. [Author](#18-author)
 
-The implemented architecture combines:
-
-- Apache Kafka for event ingestion;
-- Apache Spark for stream processing;
-- Parquet for historical event storage;
-- PostgreSQL/PostGIS for operational and spatial data;
-- Apache Airflow for workflow orchestration;
-- scikit-learn for anomaly detection;
-- graph/topology analysis for anomaly localization;
-- QGIS for spatial visualization;
-- Docker for reproducible execution environments.
-
-The project demonstrates the progression from raw sensor measurements to operational network intelligence:
-
-```text
-Sensor Simulation
-        ↓
-Kafka Ingestion
-        ↓
-Spark Processing
-        ↓
-Parquet + PostgreSQL/PostGIS
-        ↓
-Airflow Orchestration
-        ↓
-Anomaly Detection
-        ↓
-Sensor-Level Interpretation
-        ↓
-Network Topology Analysis
-        ↓
-Candidate Pipe Localization
-        ↓
-PostGIS
-        ↓
-QGIS Visualization
-```
-
-> Anomalies indicate unusual network behaviour requiring investigation. They are not automatically treated as confirmed leaks, and localization results represent candidate network assets rather than guaranteed leaking pipes.
-
----
-
-## Architecture
+## 1. Project Overview
+The platform demonstrates a complete engineering workflow:
 
 ```text
-BattLeDIM Historical SCADA Data
-                │
-                ▼
-        Python Sensor Simulator
-                │
-                ▼
-           Apache Kafka
-      water-sensor-events
-                │
-                ▼
-      Spark Structured Streaming
-                │
-         ┌──────┴──────┐
-         ▼             ▼
-      Parquet       PostgreSQL
-     Historical       Staging
-      Storage            │
-                         ▼
-                    Apache Airflow
-                         │
-                         ▼
-                 PostgreSQL/PostGIS
-                    Serving Layer
-                         │
-              ┌──────────┴──────────┐
-              ▼                     ▼
-     sensor_metrics_15min   network_anomaly_results
-                                    │
-                                    ▼
-                            Sensor Interpretation
-                                    │
-                                    ▼
-                            Network Topology
-                                    │
-                                    ▼
-                      network_localization_results
-                                    │
-                                    ▼
-                              PostGIS View
-                                    │
-                                    ▼
-                                  QGIS
+
+Historical SCADA Data
+| v
+
+Python Sensor Simulator
+| v
+
+Apache Kafka
+| v
+
+Spark Structured Streaming
+| +-------------> Parquet
+| v
+
+PostgreSQL / PostGIS
+| v
+
+Apache Airflow
+| +-------------> Anomaly Detection
+| |
+| v
+| Sensor Interpretation
+| |
+| v
+| Network Localization
+| v
+
+Dashboard Serving Views
+| v
+
+Streamlit Dashboard
+| +-- Network Overview
+
+        +-- Anomaly Monitoring
+
+        +-- Network Localization
+
 ```
 
-### Component Responsibilities
+The project intentionally separates ingestion, processing, storage, orchestration, analytics, localization, GIS, and presentation responsibilities.
+## 2. Architecture
 
+### Overall Architecture
+![Smart Water Network Intelligence Platform Architecture](docs/images/smart_water_architecture.png)
+
+```text
+
+BattLeDIM / L-Town Historical SCADA + Network Reference
+| v
+
+                Python Sensor Simulator
+| v
+
+                  Apache Kafka
+
+                water-sensor-events
+| v
+
+             Spark Structured Streaming
+| validation / event time
+| watermark / aggregation
+
+              +--------------------+
+| |
+              v                    v
+
+           Parquet            PostgreSQL
+
+           Storage            Operational Data
+| v
+
+                           Apache Airflow
+| +-------------+-------------+
+| |
+                     v                           v
+
+             Anomaly Detection          Network Localization
+
+             Baseline + ML              + Network Topology
+| |
+                     +-------------+-------------+
+| v
+
+                         PostgreSQL / PostGIS
+
+                         Analytical Serving
+| |
+                              v        v
+
+                         Streamlit    QGIS
+
+                         Dashboard   Spatial View
+
+```
+### Component responsibilities
 | Component | Responsibility |
-|---|---|
+| ---|--- |
 | Python | Sensor simulation, feature engineering, anomaly analysis, localization |
 | Apache Kafka | Streaming sensor-event ingestion |
 | Apache Spark | Validation, event-time processing, aggregation, persistence |
 | Parquet | Historical valid-event storage and rejected-event quarantine |
-| PostgreSQL | Operational, serving, anomaly, and localization data |
+| PostgreSQL | Operational, analytical, serving, anomaly, and localization data |
 | PostGIS | Network geometry and spatial serving |
 | Apache Airflow | Scheduling, orchestration, retries, and validation |
 | scikit-learn | Isolation Forest anomaly detection |
 | Network topology | Sensor-to-network attribution and candidate-pipe ranking |
-| QGIS | Spatial exploration of localization results |
-| Docker | Reproducible infrastructure and analytical environments |
-
----
-
-## Data Source
-
+| QGIS | Spatial investigation of localization results |
+| Streamlit | Interactive operational analytics dashboard |
+| Docker | Reproducible infrastructure and execution environments |
+| Git / GitHub | Version control and project publication |
+## 3. Data Source and Simulation Model
 The project uses the **BattLeDIM 2018 dataset** together with the **L-Town EPANET water-distribution network model**.
 
 L-Town is a benchmark network and should not be interpreted as a real Rwandan water network.
-
-### SCADA Measurements
-
+### SCADA measurements
 | Measurement | Sensors |
-|---|---:|
+| ---|---: |
 | Pressure | 33 |
 | Flow | 3 |
 | Tank level | 1 |
 | Demand | 82 |
 | **Total** | **119** |
-
 The 2018 SCADA data contains **105,120 timestamps at 5-minute intervals**, with 119 measurements at each timestamp.
-
-### Network Reference Data
-
+### Network reference data
 ```text
+
 Sensors          119
+
 Network nodes    785
+
 Network links    909
 
 Pipes            905
+
 Pump               1
-Valves              3
+
+Valves             3
+
 ```
 
-All 119 sensors are mapped to network assets.
+All 119 sensors are mapped to network assets. The source network uses the BattLeDIM/L-Town **local model coordinate system (SRID 0)**; no unsupported geographic CRS is assigned.
 
-Network geometry uses the BattLeDIM/L-Town **local model coordinate system (SRID 0)**. No geographic CRS is assumed.
-
-Known leakage information is kept separate from detector and localization inputs and is used only for evaluation.
+Known leakage information is kept separate from detector and localization inputs and is used for evaluation rather than model training or threshold tuning.
 
 Raw source data is preserved unchanged and excluded from Git.
-
----
-
-## Streaming Data Pipeline
-
+## 4. Streaming Data Pipeline
 The Python simulator converts historical SCADA observations into chronological sensor events and publishes them to:
 
 ```text
+
 water-sensor-events
+
 ```
 
 Spark Structured Streaming performs:
 
 ```text
+
 Kafka ingestion
-      ↓
+| v
+
 JSON parsing
-      ↓
+| v
+
 Schema validation
-      ↓
+| v
+
 Structural validation
-      ↓
+| v
+
 Event-time processing
-      ↓
+| v
+
 10-minute watermark
-      ↓
+| v
+
 15-minute sensor aggregation
-      ↓
-Parquet + PostgreSQL persistence
+| +-------------> Parquet
+| v
+
+PostgreSQL persistence
+
 ```
 
 A controlled validation replay processed:
 
 ```text
+
 1,428 sensor events
+
 1,428 valid historical events
+
 0 rejected events
+
 476 staging metrics
+
 476 serving metrics
+
 ```
 
-Repeated serving-layer execution remains at **476 records**, demonstrating idempotent persistence for the validated workload.
-
----
-
-# Phase 8 — Network Anomaly Detection
-
+Repeated serving-layer execution remained at **476 records**, demonstrating idempotent persistence for the validated workload.
+## 5. Network Anomaly Detection
 Phase 8 extended the platform from data engineering into **network-level anomaly intelligence**.
-
-![Phase 8 - Network Anomaly Detection](docs/images/phase8/phase8_anomaly_detection_overview.png)
-
-## Detection Approach
-
+## Detection approach
 Two complementary detectors were implemented.
-
-### Statistical Baseline
-
-The explainable baseline uses causal weekly-deviation statistics.
-
-A sensor is considered abnormal when:
+### Statistical baseline
+The explainable baseline uses causal weekly-deviation statistics. A sensor is considered abnormal when:
 
 ```text
-|z-score| >= 3
+| z-score| >= 3
+
 ```
 
 and a network anomaly is triggered when at least:
 
 ```text
+
 15 of 119 sensors
+
 ```
 
 are simultaneously abnormal.
@@ -226,26 +254,35 @@ are simultaneously abnormal.
 Validated result:
 
 ```text
+
 Anomaly timestamps    1,128
+
 Anomaly rate            1.12%
+
 ```
-
 ### Isolation Forest
-
 The unsupervised model uses 357 causal features:
 
 ```text
-119 × 5-minute changes
-119 × 1-hour changes
-119 × weekly deviations
+
+119 x 5-minute changes
+
+119 x 1-hour changes
+
+119 x weekly deviations
+
 ```
 
 Configuration:
 
 ```text
+
 n_estimators = 200
+
 contamination = "auto"
+
 random_state = 42
+
 ```
 
 The anomaly threshold is fixed from the **99th percentile of training-period scores**, without using future scoring data or leakage labels.
@@ -253,19 +290,18 @@ The anomaly threshold is fixed from the **99th percentile of training-period sco
 Validated result:
 
 ```text
+
 Threshold             0.521368
+
 Anomaly timestamps       5,897
+
 Anomaly rate               5.83%
+
 ```
-
-## Ground-Truth Evaluation
-
+## Ground-truth evaluation
 Both detectors were evaluated against **14 known BattLeDIM leakage events**.
-
-Leakage labels were not used for detector training, feature selection, or threshold tuning.
-
 | Evaluation | Baseline | Isolation Forest |
-|---|---:|---:|
+| ---|---:|---: |
 | Anomaly timestamps | 1,128 | 5,897 |
 | Anomaly rate | 1.12% | 5.83% |
 | Alert within 24 h | 8 / 14 | 13 / 14 |
@@ -273,85 +309,62 @@ Leakage labels were not used for detector training, feature selection, or thresh
 | Mean first-alert delay | 30.08 h | 7.10 h |
 | Median first-alert delay | 15.50 h | 4.79 h |
 | Maximum first-alert delay | 107.25 h | 33.00 h |
-
-Isolation Forest produced substantially earlier warnings, but with a higher alert burden.
-
-The result is therefore treated as an **operational trade-off between earlier warning and alert volume**, rather than evidence that one detector is universally more accurate.
-
----
-
-# Phase 9 — Anomaly Interpretation, Network Localization & GIS
-
-Phase 9 extends anomaly detection into **interpretable spatial decision support**.
-
-![Phase 9 - Anomaly Interpretation, Network Localization and GIS](docs/images/phase9/phase9_localization_gis_overview.png)
+The results demonstrate an operational trade-off between earlier warning and alert volume. They are not presented as evidence that one detector is universally superior.
+## 6. Interpretation, Localization and GIS
+Phase 9 extends anomaly detection into **interpretable network decision support**.
 
 The objective is to move from:
 
 ```text
+
 "An anomaly exists"
+
 ```
 
 toward:
 
 ```text
+
 "Which sensors explain the anomaly,
+
 and which parts of the network should be investigated?"
+
 ```
+## Sensor-level interpretation
+Isolation Forest provides a network-level anomaly score but does not directly identify the sensor responsible for an anomaly. The localization layer therefore uses causal statistical sensor evidence to identify abnormal measurements.
 
-## Sensor-Level Interpretation
-
-Isolation Forest provides a network-level anomaly score but does not directly identify which sensor caused the anomaly.
-
-The localization layer therefore uses causal statistical sensor evidence to identify abnormal measurements.
-
-This deliberately separates:
+This separates:
 
 ```text
+
 Detection
-    ↓
+| v
+
 Interpretation
-    ↓
+| v
+
 Localization
+
 ```
-
-Isolation Forest determines **when the network should be investigated**, while sensor-level statistics provide interpretable evidence about **where abnormal behaviour is being observed**.
-
-## Sensor-to-Network Attribution
-
-The physical network is represented as a graph using its nodes and links.
-
-The localization system implements:
-
-- sensor-to-node/link mapping;
-- graph construction from network topology;
-- shortest-hop distance calculation;
-- cached topology distances;
-- node and link sensor attribution.
-
-This connects abnormal sensor measurements to the surrounding physical network.
-
-## Candidate Pipe Localization
-
+## Sensor-to-network attribution
+The physical network is represented as a graph using its nodes and links. The localization system implements sensor-to-node/link mapping, graph construction, shortest-hop distance calculation, cached topology distances, and node/link sensor attribution.
+## Candidate pipe localization
 Candidate pipes are ranked using a transparent heuristic combining sensor abnormality and network distance:
 
 ```text
-contribution =
-|sensor z-score|
-─────────────────────────
-1 + topology distance
+| sensor z-score |
+contribution = --------------------
+
+                1 + topology distance
+
 ```
 
 The system persists the **Top 25 candidate pipes** for each localizable ML anomaly timestamp.
 
-The ranking is an investigation aid and is **not interpreted as the probability that a pipe is leaking**.
-
-## Localization Evaluation
-
-The localization method was independently evaluated against the 14 known BattLeDIM leaking pipes.
-
+The ranking is an investigation aid. It is **not interpreted as the probability that a pipe is leaking**.
+## Localization evaluation
 | Metric | Result |
-|---|---:|
+| ---|---: |
 | Known leakage events | 14 |
 | Localization available | 13 / 14 |
 | Exact Top-1 matches | 0 |
@@ -360,129 +373,221 @@ The localization method was independently evaluated against the 14 known BattLeD
 | Top-25 matches | 4 |
 | Median true-pipe rank | 160 |
 | Median Rank-1 distance to true pipe | 25 network hops |
-
-The evaluation shows that the current topology-weighted heuristic can produce **candidate network assets**, but it is not reliable enough for exact-pipe leak localization.
-
-The method was not retuned against the leakage labels after evaluation.
-
-This limitation is preserved explicitly rather than overstating model performance.
-
----
-
-## PostgreSQL/PostGIS Localization Layer
-
-Localization results are persisted in:
-
-```text
-network_localization_results
-```
-
-with:
-
-```text
-timestamp
-pipe_id
-localization_score
-candidate_rank
-created_at
-```
-
-The table includes primary/foreign-key constraints, validation rules, indexes, and repeat-safe persistence.
-
-Validated state:
-
-```text
-ML anomaly timestamps          5,897
-Localized timestamps           4,868
-Unlocalized anomalies          1,029
-Localization records         121,700
-Distinct candidate pipes         495
-Candidates per timestamp           25
-```
-
-The 1,029 unlocalized anomalies did not contain sufficient qualifying sensor evidence. The system therefore does not force a location when evidence is insufficient.
-
----
-
-## GIS Integration
-
-Localization results are joined to PostGIS network geometry through:
-
-```text
-localization_qgis_view
-```
-
-The QGIS serving view contains:
-
-```text
-Rows                    121,700
-Unique feature IDs      121,700
-NULL feature IDs              0
-Missing geometries            0
-```
-
-The QGIS project visualizes:
-
-- the complete pipe network;
-- anomaly-specific candidate pipes;
-- candidate rank using graduated symbology;
-- Top-5 candidate labels.
-
-The project is stored under:
-
-```text
-gis/smart_water_localization.qgz
-```
+The evaluation shows that the current topology-weighted heuristic can produce candidate network assets, but it is not reliable enough for exact-pipe leak localization. This limitation is preserved explicitly rather than overstating model performance.
+## GIS integration
+Localization results are joined to PostGIS network geometry through the existing QGIS serving view. The QGIS project visualizes the complete pipe network, anomaly-specific candidate pipes, candidate rank, and Top-5 candidate labels.
 
 Because the source network uses local/model coordinates, the visualization intentionally avoids assigning an unsupported geographic CRS.
+## 7. Operational Analytics Dashboard
+Phase 10 adds an interactive **Streamlit operational analytics layer** on top of the validated PostgreSQL serving data.
 
----
+The dashboard is a decision-support interface rather than a replacement for the underlying analytical pipeline.
+## Dashboard structure
+```text
 
-## Airflow Orchestration
+Smart Water Network Intelligence
+| +-- Network Overview
+| +-- 119 monitored sensors
+| +-- 785 network nodes
+| +-- 909 network links
+| +-- 905 pipes
+| +-- Anomaly Monitoring
+| +-- anomaly totals
+| +-- ML anomaly rate
+| +-- baseline anomaly activity
+| +-- anomaly timeline
+| +-- investigation filters
+| +-- selected-event evidence
+| +-- Network Localization
 
-The daily Airflow DAG now orchestrates the complete serving, anomaly-detection, and localization workflow:
+    +-- localized anomaly count
+
+    +-- localization coverage
+
+    +-- candidate-pipe activity
+
+    +-- selected anomaly timestamp
+
+    +-- ranked candidate network assets
+
+```
+## Dashboard serving layer
+Dashboard-specific PostgreSQL views are created in:
 
 ```text
+
+sql/06_create_dashboard_views.sql
+
+```
+
+The views are:
+
+```text
+
+dashboard_anomaly_daily
+
+dashboard_anomaly_detail
+
+dashboard_localization_summary
+
+dashboard_localization_candidates
+
+```
+
+This creates a clean serving boundary between analytical tables and dashboard queries.
+## Validated dashboard results
+
+### Network
+```text
+
+Sensors              119
+
+Network nodes        785
+
+Network links        909
+
+Pipes                905
+
+```
+### Anomaly intelligence
+```text
+
+Scored timestamps             101,088
+
+ML anomaly timestamps           5,897
+
+ML anomaly rate                   5.83%
+
+Baseline anomaly timestamps      1,128
+
+Baseline anomaly rate             1.12%
+
+```
+
+Analysis period:
+
+```text
+
+2018-01-15 -> 2018-12-31
+
+```
+### Localization intelligence
+```text
+
+ML anomaly timestamps           5,897
+
+Localized timestamps            4,868
+
+Unlocalized anomalies           1,029
+
+Localization coverage          82.55%
+
+Localization records          121,700
+
+Distinct candidate pipes         495
+
+Candidates per localized event    25
+
+```
+### Temporal analytics
+The dashboard includes daily anomaly activity. The highest ML anomaly activity in the validated daily dataset occurred on **2018-07-19**, with 76 ML anomaly timestamps and a 26.39% daily ML anomaly rate. Other high-activity periods occurred during May-August 2018.
+
+These results indicate periods of elevated detected anomaly activity. They do not by themselves establish the physical cause of the anomalies.
+## Dashboard implementation
+```text
+
+dashboard/
+
++-- app.py
+
++-- app_overview\.py
+
++-- db.py
+
++-- queries.py
+
++-- components/
+| +-- styles.py
+| +-- __init__.py
+
++-- pages/
+
+    +-- 1_Anomaly_Monitoring.py
+
+    +-- 2_Network_Localization.py
+
+```
+
+The application connects to PostgreSQL through SQLAlchemy and uses dedicated query functions for the dashboard serving views.
+### Run locally
+From the project root:
+
+```cmd
+
+streamlit run dashboard\app.py
+
+```
+
+The dashboard opens in a browser on the local Streamlit server, normally at:
+
+```text
+
+http\://localhost:8501
+
+```
+
+A public deployment can be added later without changing the analytical architecture.
+### Dashboard interpretation
+The dashboard is a **simulation/benchmark demonstration**. A future deployed version will expose analytical results generated from the project dataset and pipeline, not live measurements from a utility network.
+## 8. Airflow Orchestration
+The daily Airflow workflow orchestrates the serving, anomaly-detection, and localization pipeline:
+
+```text
+
 check_postgresql
-        ↓
+| v
+
 upsert_sensor_metrics
-        ↓
+| v
+
 validate_metric_load
-        ↓
+| v
+
 validate_reference_data
-        ↓
+| v
+
 run_anomaly_detection
-        ↓
+| v
+
 validate_anomaly_results
-        ↓
+| v
+
 run_localization
-        ↓
+| v
+
 validate_localization_results
+
 ```
 
 Configuration:
 
 ```text
+
 schedule       @daily
+
 retries        2
+
 retry delay    5 minutes
+
 catchup        False
+
 ```
 
-A controlled integrated execution successfully completed **all 8 tasks**.
-
 The Airflow schedule orchestrates the workflow; it does not imply that Kafka itself only processes data once per day.
-
-The validated anomaly/localization workload operates on the historical **5-minute BattLeDIM detector dataset**. It is not claimed to consume the separate 15-minute Spark serving table directly.
-
----
-
-## End-to-End Validation
-
-The final Phase 9 workflow was validated after execution through Airflow.
-
+## 9. End-to-End Validation
+The final analytical workflow was validated through PostgreSQL and Airflow.
 | Validation | Result |
-|---|---:|
+| ---|---: |
 | Anomaly rows | 101,088 |
 | ML anomaly timestamps | 5,897 |
 | Localization rows | 121,700 |
@@ -498,29 +603,41 @@ The final Phase 9 workflow was validated after execution through Airflow.
 | Negative localization scores | 0 |
 | QGIS view rows | 121,700 |
 | Unique QGIS feature IDs | 121,700 |
-
-This validates the operational chain:
+The validated chain is:
 
 ```text
+
+Sensor Data
+| v
+
+Streaming Pipeline
+| v
+
+PostgreSQL
+| v
+
 Anomaly Detection
-        ↓
+| v
+
 Sensor Evidence
-        ↓
+| v
+
 Topology Attribution
-        ↓
+| v
+
 Candidate Pipe Ranking
-        ↓
-PostgreSQL/PostGIS
-        ↓
-QGIS
+| +-------------> PostGIS / QGIS
+| v
+
+Dashboard Serving Views
+| v
+
+Streamlit Dashboard
+
 ```
-
----
-
-## Technology Stack
-
+## 10. Technology Stack
 | Technology | Role |
-|---|---|
+| ---|--- |
 | Python | Simulation, feature engineering, anomaly detection, localization |
 | Pandas / NumPy | Data transformation and analytical processing |
 | scikit-learn | Isolation Forest |
@@ -529,109 +646,95 @@ QGIS
 | PostgreSQL / PostGIS | Operational, analytical, and spatial storage |
 | Parquet | Historical event storage |
 | Apache Airflow 3.3.1 | Workflow orchestration and validation |
+| Streamlit | Operational analytics dashboard |
 | QGIS 3.44 | Network and localization visualization |
-| Docker / Docker Compose | Reproducible infrastructure and ML execution |
+| Docker / Docker Compose | Reproducible infrastructure |
 | Git / GitHub | Version control and project publication |
-
----
-
-## Project Structure
-
+## 11. Project Structure
 ```text
+
 Smart-water-network-platform/
-│
-├── docs/
-│   └── images/
-│       ├── phase8/
-│       │   └── phase8_anomaly_detection_overview.png
-│       └── phase9/
-│           └── phase9_localization_gis_overview.png
-│
-├── gis/
-│   └── smart_water_localization.qgz
-│
-├── data/
-│   ├── raw/
-│   ├── reference/
-│   ├── lake/
-│   └── checkpoints/
-│
-├── infrastructure/
-│   ├── airflow/
-│   │   ├── dags/
-│   │   │   └── smart_water_daily_pipeline.py
-│   │   └── docker-compose.yml
-│   ├── kafka/
-│   ├── ml/
-│   ├── postgres/
-│   └── spark/
-│
-├── sql/
-│   ├── 01_create_storage_schema.sql
-│   ├── 02_upsert_sensor_metrics.sql
-│   ├── 03_create_network_anomaly_results.sql
-│   ├── 04_create_network_localization_results.sql
-│   └── 05_create_localization_qgis_view.sql
-│
-├── src/
-│   ├── anomaly_detection/
-│   ├── localization/
-│   ├── data/
-│   ├── exploration/
-│   ├── simulator/
-│   └── streaming/
-│
-├── .gitignore
-├── requirements.txt
-└── README.md
+| +-- dashboard/
+
++-- docs/
+
++-- gis/
+
++-- infrastructure/
+| +-- airflow/
+| +-- kafka/
+| +-- ml/
+| +-- postgres/
+| +-- spark/
+
++-- sql/
+| +-- 01_create_storage_schema.sql
+| +-- 02_upsert_sensor_metrics.sql
+| +-- 03_create_network_anomaly_results.sql
+| +-- 04_create_network_localization_results.sql
+| +-- 05_create_localization_qgis_view\.sql
+| +-- 06_create_dashboard_views.sql
+
++-- src/
+| +-- anomaly_detection/
+| +-- data/
+| +-- exploration/
+| +-- localization/
+| +-- simulator/
+| +-- streaming/
+
++-- .gitignore
+
++-- requirements.txt
+
++-- README.md
+
 ```
 
 Runtime files, credentials, generated lake data, Spark checkpoints, virtual environments, and Python caches are excluded from version control.
-
----
-
-## Local Setup
-
-The current implementation has been developed and validated on Windows using Docker Desktop.
-
+## 12. Local Setup
+The project has been developed and validated on Windows using Docker Desktop.
 ### Prerequisites
-
 - Git
+
 - Python
+
 - Docker Desktop with Docker Compose
+
 - QGIS for spatial visualization
-
-### Environment Configuration
-
+### Environment configuration
 Use:
 
 ```text
+
 infrastructure/postgres/.env.example
+
 ```
 
 as the template for:
 
 ```text
+
 infrastructure/postgres/.env
+
 ```
 
 The real `.env` file is excluded from Git.
-
-### Create Shared Docker Network
-
+### Create shared Docker network
 ```cmd
+
 docker network create smart-water-network
-```
 
+```
 ### Start PostgreSQL/PostGIS
-
 ```cmd
+
 docker compose --env-file infrastructure\postgres\.env -f infrastructure\postgres\docker-compose.yml up -d
+
 ```
-
-### Initialize Database
-
+### Initialize database
 ```cmd
+
 docker exec -i smart-water-postgres psql -U smart_water_user -d smart_water < sql\01_create_storage_schema.sql
 
 docker exec -i smart-water-postgres psql -U smart_water_user -d smart_water < sql\02_upsert_sensor_metrics.sql
@@ -640,195 +743,190 @@ docker exec -i smart-water-postgres psql -U smart_water_user -d smart_water < sq
 
 docker exec -i smart-water-postgres psql -U smart_water_user -d smart_water < sql\04_create_network_localization_results.sql
 
-docker exec -i smart-water-postgres psql -U smart_water_user -d smart_water < sql\05_create_localization_qgis_view.sql
+docker exec -i smart-water-postgres psql -U smart_water_user -d smart_water < sql\05_create_localization_qgis_view\.sql
+
+docker exec -i smart-water-postgres psql -U smart_water_user -d smart_water < sql\06_create_dashboard_views.sql
+
 ```
-
-### Load Reference Data
-
+### Load reference data
 ```cmd
+
 python -m src.data.load_reference_data
-```
 
+```
 ### Start Kafka
-
 ```cmd
+
 docker compose -f infrastructure\kafka\docker-compose.yml up -d
+
 ```
-
-### Replay Sensor Data
-
+### Replay sensor data
 ```cmd
+
 python -m src.simulator.sensor_simulator
-```
 
+```
 ### Run Spark
-
 ```cmd
+
 infrastructure\spark\run_spark_stream.cmd
+
 ```
-
-### Build ML Environment
-
-```cmd
-docker build -f infrastructure\ml\Dockerfile -t smart-water-ml .
-```
-
 ### Start Airflow
-
 ```cmd
+
 docker compose --env-file infrastructure\postgres\.env -f infrastructure\airflow\docker-compose.yml up -d
+
 ```
+### Run the dashboard
+```cmd
 
-The Airflow UI/API is exposed locally on port:
+streamlit run dashboard\app.py
 
-```text
-8081
 ```
+## 13. Engineering Principles
+- **Separation of responsibilities:** each platform component has a defined role.
 
-### Trigger Integrated Pipeline
+- **Causal analytics:** anomaly features and sensor evidence avoid future observations.
+
+- **Ground-truth separation:** leakage labels are used for evaluation rather than detector/localization input or threshold tuning.
+
+- **Baseline before ML:** an explainable statistical detector provides a reference before additional ML complexity.
+
+- **Evidence before claims:** anomalies are not automatically classified as leaks, and candidate pipes are not presented as confirmed leak locations.
+
+- **Idempotent persistence:** repeated analytical execution is designed to avoid duplicate records.
+
+- **Data-quality validation:** validation is performed between major pipeline stages and after final persistence.
+
+- **Raw-data preservation:** source datasets are not modified in place.
+
+- **Secrets management:** credentials remain in ignored environment files.
+
+- **Incremental architecture:** technologies are introduced only when they have a clear responsibility.
+## 14. Project Progress
+| Phase | Scope | Status |
+| ---|---|--- |
+| 1 | Project design | Complete |
+| 2 | Data acquisition and understanding | Complete |
+| 3 | Python sensor simulator | Complete |
+| 4 | Kafka streaming ingestion | Complete |
+| 5 | Spark Structured Streaming | Complete |
+| 6 | Persistent storage | Complete |
+| 7 | Airflow orchestration and integration | Complete |
+| 8 | Network anomaly detection | Complete |
+| 9 | Anomaly interpretation, localization and GIS | Complete |
+| 10 | Operational analytics and Streamlit dashboard | Complete |
+| Future | Public dashboard deployment / selected AWS services | Planned |
+## 15. Current Capabilities
+
+### Data Engineering
+- event simulation
+
+- Kafka ingestion
+
+- Spark Structured Streaming
+
+- Parquet storage
+
+- PostgreSQL serving
+
+- Airflow orchestration
+### Machine Learning & Analytics
+- causal feature engineering
+
+- statistical anomaly detection
+
+- Isolation Forest
+
+- ground-truth evaluation
+
+- sensor-level anomaly interpretation
+### Network Intelligence
+- graph construction
+
+- sensor-to-network attribution
+
+- shortest-hop analysis
+
+- candidate-pipe ranking
+### Geospatial Analytics
+- PostGIS network geometry
+
+- spatial serving views
+
+- QGIS visualization
+### Operational Analytics
+- Streamlit dashboard
+
+- network KPIs
+
+- anomaly investigation
+
+- localization investigation
+
+- temporal anomaly analysis
+
+- PostgreSQL dashboard serving views
+### Engineering Quality
+- Dockerized execution
+
+- data-quality validation
+
+- idempotent persistence
+
+- reproducible workflows
+
+- explicit model limitations
+
+- secrets exclusion
+## 16. Public Dashboard
+**Status:** Not yet publicly deployed.
+
+Current local command:
 
 ```cmd
-docker exec smart-water-airflow-scheduler airflow dags trigger smart_water_daily_pipeline
+
+streamlit run dashboard\app.py
+
 ```
 
----
-
-## Engineering Principles
-
-The project follows several deliberate engineering principles:
-
-**Separation of responsibilities**  
-Kafka handles ingestion, Spark handles streaming transformations, PostgreSQL/PostGIS provides structured and spatial storage, Airflow orchestrates workflows, and the ML environment performs anomaly and localization workloads.
-
-**Causal analytics**  
-Anomaly features and sensor evidence avoid using future observations.
-
-**Ground-truth separation**  
-Leakage labels are used for evaluation rather than detector/localization input or threshold tuning.
-
-**Baseline before ML**  
-An explainable statistical detector provides a reference before evaluating additional ML complexity.
-
-**Evidence before claims**  
-Anomalies are not automatically classified as leaks, and candidate pipes are not presented as confirmed leak locations.
-
-**Idempotent persistence**  
-Repeated serving, anomaly, and localization execution does not create duplicate analytical records.
-
-**Data-quality validation**  
-Validation is performed between major pipeline stages and after final persistence.
-
-**Raw-data preservation**  
-Source datasets are never modified in place.
-
-**Secrets management**  
-Credentials remain in ignored environment files.
-
-**Incremental architecture**  
-Technologies are introduced only when they have a clear responsibility.
-
----
-
-## Project Progress
-
-| Phase | Scope | Status |
-|---|---|---|
-| 1 | Project design | ✅ |
-| 2 | Data acquisition and understanding | ✅ |
-| 3 | Python sensor simulator | ✅ |
-| 4 | Kafka streaming ingestion | ✅ |
-| 5 | Spark Structured Streaming | ✅ |
-| 6 | Persistent storage | ✅ |
-| 7 | Airflow orchestration and integration | ✅ |
-| 8 | Network anomaly detection | ✅ |
-| 9 | Anomaly interpretation, localization and GIS | ✅ |
-| 10 | Operational analytics / dashboards | Planned |
-| Future | Selected AWS deployment | Planned |
-
----
-
-## Current Capabilities
-
-The platform currently demonstrates:
+Public URL will be added after deployment:
 
 ```text
-Data Engineering
-├── event simulation
-├── Kafka ingestion
-├── Spark processing
-├── Parquet storage
-├── PostgreSQL serving
-└── Airflow orchestration
 
-Machine Learning & Analytics
-├── causal feature engineering
-├── statistical anomaly detection
-├── Isolation Forest
-├── ground-truth evaluation
-└── sensor-level anomaly interpretation
+PUBLIC DASHBOARD URL: To be added after deployment
 
-Network Intelligence
-├── graph construction
-├── sensor-to-network attribution
-├── shortest-hop analysis
-└── candidate-pipe ranking
-
-Geospatial Analytics
-├── PostGIS network geometry
-├── spatial serving views
-└── QGIS visualization
-
-Engineering Quality
-├── Dockerized execution
-├── data-quality validation
-├── idempotent persistence
-├── reproducible workflows
-└── explicit model limitations
 ```
 
----
-
-## Next Development Stage
-
-With the core data pipeline, anomaly detection, interpretation, network localization, PostGIS integration, and QGIS visualization validated, the next stage will focus on **operational analytics and presentation**.
-
-Potential extensions include:
-
-- operational dashboards;
-- anomaly and sensor trend visualization;
-- network monitoring KPIs;
-- automated testing;
-- stronger hydraulic/spatial localization methods;
-- selected AWS services where they provide clear architectural value.
-
-Future localization improvements will be evaluated independently rather than tuned to make the existing BattLeDIM ground-truth results appear stronger.
-
----
-
-## Reproducibility
-
+The eventual deployment will expose the same simulated/benchmark analytical results described in this repository; it will not represent live utility-network telemetry.
+## 17. Reproducibility and Version Control
 The repository excludes machine-specific, generated, and sensitive files including:
 
 ```text
+
 .env
+
 *.env
+
 venv/
+
 __pycache__/
+
 *.pyc
+
 data/raw/
+
 data/lake/
+
 data/checkpoints/
+
 ```
 
-`.env.example` documents required configuration without exposing credentials.
+The repository focuses on source code, infrastructure definitions, SQL, analytical logic, GIS configuration, dashboard code, and documentation required to understand and reproduce the architecture.
+## 18. Author
+**GATERA Emile**
 
-The repository focuses on source code, infrastructure definitions, SQL, analytical logic, GIS configuration, and documentation required to understand and reproduce the architecture.
-
----
-
-## Author
-
-**GATERA Emile**  
 Civil & Water Resources Engineer | Data Engineering & Analytics
 
-This project combines water-infrastructure domain knowledge with practical data engineering, streaming systems, database design, workflow orchestration, machine learning, network analysis, and geospatial analytics.
+This project combines water-infrastructure domain knowledge with practical data engineering, streaming systems, database design, workflow orchestration, machine learning, network analysis, geospatial analytics, and operational dashboard development.
