@@ -9,31 +9,29 @@ from dotenv import load_dotenv
 
 ENV_FILE = Path("infrastructure/postgres/.env")
 
+REQUIRED_VARIABLES = [
+    "POSTGRES_HOST",
+    "POSTGRES_PORT",
+    "POSTGRES_DB",
+    "POSTGRES_USER",
+    "POSTGRES_PASSWORD",
+]
+
 
 def get_database_connection():
-    """Create a PostgreSQL connection using environment settings."""
+    """Create a PostgreSQL connection using environment settings.
 
-    if not ENV_FILE.exists():
-        raise FileNotFoundError(
-            f"Database environment file not found: {ENV_FILE}"
-        )
+    Values already present in the runtime environment (Docker, CI,
+    cloud) always win. The local .env file is optional and is only
+    used to fill in values that are not already set.
+    """
 
-    # Load values from .env only when they are not already provided
-    # by the runtime environment. This allows Docker to override
-    # host and port while local development continues using .env.
-    load_dotenv(ENV_FILE, override=False)
-
-    required_variables = [
-        "POSTGRES_HOST",
-        "POSTGRES_PORT",
-        "POSTGRES_DB",
-        "POSTGRES_USER",
-        "POSTGRES_PASSWORD",
-    ]
+    if ENV_FILE.exists():
+        load_dotenv(ENV_FILE, override=False)
 
     missing_variables = [
         variable
-        for variable in required_variables
+        for variable in REQUIRED_VARIABLES
         if not os.getenv(variable)
     ]
 
@@ -41,6 +39,8 @@ def get_database_connection():
         raise EnvironmentError(
             "Missing database environment variables: "
             + ", ".join(missing_variables)
+            + f". Set them in the environment or in {ENV_FILE} "
+            "(see infrastructure/postgres/.env.example)."
         )
 
     return pg8000.dbapi.connect(
