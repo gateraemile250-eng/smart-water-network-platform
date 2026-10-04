@@ -15,3 +15,27 @@ __pycache__/
 # Environment variables and secrets
 .env
 *.env
+# Environment files (keep the template tracked)
+.env.*
+!.env.example
+
+# AWS credentials and keys
+.aws/
+credentials
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Terraform state
+*.tfstate
+*.tfstate.*
+.terraform/
+
+# Editor, OS and tool clutter
+.ipynb_checkpoints/
+.pytest_cache/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

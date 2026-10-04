@@ -1,6 +1,7 @@
 """Process water sensor events from Kafka using Spark Structured Streaming."""
 
 import os
+from pathlib import Path
 
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
@@ -196,6 +197,36 @@ def calculate_window_metrics(stream):
     )
 
 
+def has_parquet_files(path):
+    """Return True when a Parquet directory already holds data files."""
+
+    return any(Path(path).glob("*.parquet"))
+
+
+def drop_already_stored_events(spark, events):
+    """Return only events whose event_id is not already in the lake.
+
+    foreachBatch delivers batches at least once, and event_id is
+    deterministic, so the same event can arrive again (a reset
+    checkpoint, or the simulator publishing the same hour twice).
+    Duplicates inside the batch are removed first, then events that
+    are already stored are dropped. The first stored copy wins.
+    """
+
+    unique_events = events.dropDuplicates(["event_id"])
+
+    if not has_parquet_files(VALID_EVENTS_PATH):
+        return unique_events
+
+    stored_ids = spark.read.parquet(VALID_EVENTS_PATH).select("event_id")
+
+    return unique_events.join(
+        stored_ids,
+        on="event_id",
+        how="left_anti",
+    )
+
+
 def write_event_batch(batch_df, batch_id):
     """Store valid and rejected events as Parquet."""
 
@@ -230,6 +261,11 @@ def write_event_batch(batch_df, batch_id):
             "offset",
             "rejection_reason",
         )
+    )
+
+    valid = drop_already_stored_events(
+        batch_df.sparkSession,
+        valid,
     )
 
     if not valid.isEmpty():
