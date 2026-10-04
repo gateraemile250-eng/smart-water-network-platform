@@ -3,22 +3,22 @@ services:
     image: postgis/postgis:17-3.5
     container_name: smart-water-postgres
 
-    ports:
-      - "5433:5432"
-
     environment:
-      POSTGRES_DB: smart_water
-      POSTGRES_USER: smart_water_user
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in infrastructure/postgres/.env}
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in infrastructure/postgres/.env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in infrastructure/postgres/.env}
 
     volumes:
       - smart_water_postgres_data:/var/lib/postgresql/data
+
+    ports:
+      - "5433:5432"
 
     healthcheck:
       test:
         [
           "CMD-SHELL",
-          "pg_isready -U smart_water_user -d smart_water"
+          "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"
         ]
       interval: 10s
       timeout: 5s

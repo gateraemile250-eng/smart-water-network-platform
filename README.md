@@ -865,6 +865,8 @@ copy infrastructure\postgres\.env.example infrastructure\postgres\.env
 In `infrastructure\postgres\.env`:
 
 - set `POSTGRES_PASSWORD` to a password of your choice;
+- keep the template's `POSTGRES_USER` and `POSTGRES_DB` values unless you
+  also change the names in the `psql` commands in step 6;
 - set `AIRFLOW_JWT_SECRET` to a random value, for example the output of
   `python -c "import secrets; print(secrets.token_hex(32))"`;
 - set `SMART_WATER_PROJECT_PATH` to the **absolute path of this
@@ -931,7 +933,9 @@ infrastructure\spark\run_spark_stream.cmd
 ```
 
 Replaying the simulator or re-running Spark is safe: the Parquet lake
-ignores events it already holds.
+ignores events it already holds. The first run downloads the Kafka and
+JDBC connector packages, so it needs internet access and takes a few
+minutes. The download repeats on every run.
 
 ### 12. Start Airflow
 
@@ -980,6 +984,12 @@ These are documented deliberately so that the project's scope is clear:
 - **Docker socket.** The Airflow scheduler mounts the Docker socket to
   start the ML container. This gives it control of Docker on the host
   and is acceptable for a local demonstration only.
+- **Secrets passed to the Spark container.** `run_spark_stream.cmd` passes
+  the whole `.env` file to the Spark container, including values it does
+  not need (such as the Airflow secret). This is acceptable for local
+  use and should be narrowed before any shared or cloud deployment.
+- **Internet required for Spark.** The connector packages are downloaded
+  on every Spark run.
 - **Quality checks are run manually.** They are not yet part of the
   Airflow workflow.
 - **Windows only.** The project has been tested on Windows with Docker
@@ -1029,7 +1039,7 @@ These are documented deliberately so that the project's scope is clear:
 | 8 | Network anomaly detection | Complete |
 | 9 | Anomaly interpretation, localization and GIS | Complete |
 | 10 | Operational analytics and Streamlit dashboard | Complete |
-| 11 | Foundation hardening: portable configuration, idempotent Parquet lake, automated tests, data-quality checks, documentation | Complete; fresh-clone verification in progress |
+| 11 | Foundation hardening: portable configuration, idempotent Parquet lake, automated tests, data-quality checks, documentation | Complete; verified from a fresh clone |
 | Planned | Public dashboard deployment and an optional cloud data-lake layer | Not started |
 
 ### Public Dashboard
@@ -1090,6 +1100,28 @@ added after deployment.
 - Secrets exclusion
 
 ## 18. Reproducibility and Version Control
+
+### Fresh-clone verification
+
+The setup in [Local Setup](#13-local-setup) was verified from a fresh
+clone of the repository, using a new virtual environment and new Docker
+volumes, on Windows with Docker Desktop:
+
+| Check | Result |
+|---|---|
+| `pip install -r requirements-dev.txt` and `python -m pytest` in a new virtual environment | Passed |
+| Streaming path: simulator, Kafka and Spark | 476 staging rows; Parquet quality checks passed |
+| Replaying the simulator and re-running Spark | The Parquet lake stayed at 1,428 unique events with no duplicate `event_id` |
+| Airflow DAG `smart_water_daily_pipeline` | All 8 tasks succeeded |
+| Database results | Matched the validated figures in [Section 9](#9-end-to-end-validation) exactly: 101,088 anomaly rows, 5,897 ML anomalies, 1,128 baseline anomalies, 121,700 localization rows, 4,868 localized timestamps, 495 distinct candidate pipes |
+| Streamlit dashboard | Pages loaded with the validated data |
+
+The verification has two limits. The BattLeDIM files were copied from an
+existing checkout instead of being downloaded, so the download step
+itself was not part of it, and only Windows with Docker Desktop was
+tested.
+
+### Version-control exclusions
 
 The repository excludes machine-specific, generated, and sensitive files
 including:
