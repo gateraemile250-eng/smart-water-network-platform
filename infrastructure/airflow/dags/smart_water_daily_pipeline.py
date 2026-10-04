@@ -1,3 +1,4 @@
+import os
 from datetime import datetime, timedelta
 
 from airflow.sdk import DAG
@@ -8,7 +9,15 @@ from airflow.providers.common.sql.operators.sql import (
 from airflow.providers.standard.operators.bash import BashOperator
 
 
-PROJECT_PATH = r"C:\Users\USER\Documents\Smart-water-network-platform"
+# Absolute path of the repository on the Docker host.
+# Set in infrastructure/postgres/.env.
+PROJECT_PATH = os.environ.get("SMART_WATER_PROJECT_PATH")
+
+if not PROJECT_PATH:
+    raise RuntimeError(
+        "SMART_WATER_PROJECT_PATH is not set. Add it to "
+        "infrastructure/postgres/.env and recreate the Airflow containers."
+    )
 
 
 with DAG(
