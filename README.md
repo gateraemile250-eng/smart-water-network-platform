@@ -595,11 +595,24 @@ validate_localization_results
 Configuration:
 
 ```text
-schedule      @daily
+schedule      @daily  (cron: 0 0 * * *)
 retries       2
 retry delay   5 minutes
 catchup       False
 ```
+
+The schedule runs at **00:00 UTC, which is 02:00 in Rwanda** (Central
+Africa Time, UTC+2).
+
+### Retry Behaviour
+
+Every task inherits two retries with a five-minute delay between
+attempts. This was exercised during testing: PostgreSQL became
+temporarily unavailable while the workflow was being tested, and after
+PostgreSQL was restored the configured retry behaviour was verified. The
+workflow's final end-to-end run completed with all eight tasks
+successful (see
+[Fresh-clone verification](#fresh-clone-verification)).
 
 ### How the workflow runs
 
