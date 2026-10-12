@@ -96,6 +96,23 @@ with DAG(
     )
 
     # ------------------------------------------------------------------
+    # Phase 9: Spark lake data-quality gate
+    # ------------------------------------------------------------------
+
+    validate_lake_quality = BashOperator(
+        task_id="validate_lake_quality",
+        bash_command=f"""
+            docker run --rm \
+            -v "{PROJECT_PATH}:/opt/project" \
+            -w /opt/project \
+            apache/spark:4.1.3-scala2.13-java17-python3-ubuntu \
+            /opt/spark/bin/spark-submit \
+            src/data/quality_checks.py \
+            data/lake/sensor_events
+        """,
+    )
+
+    # ------------------------------------------------------------------
     # Anomaly detection
     # ------------------------------------------------------------------
 
@@ -184,7 +201,7 @@ with DAG(
     )
 
     # ------------------------------------------------------------------
-    # 8.6.1 Production predictive scoring
+    # Phase 8: Production predictive scoring
     # ------------------------------------------------------------------
 
     run_production_predictive_scoring = BashOperator(
@@ -199,7 +216,7 @@ with DAG(
     )
 
     # ------------------------------------------------------------------
-    # 8.6.2 Production fusion
+    # Phase 8: Predictive + anomaly fusion
     # ------------------------------------------------------------------
 
     run_production_fusion = BashOperator(
@@ -214,7 +231,7 @@ with DAG(
     )
 
     # ------------------------------------------------------------------
-    # 8.6.4 Production fusion validation
+    # Phase 8: Predictive fusion validation
     # ------------------------------------------------------------------
 
     validate_predictive_fusion = BashOperator(
@@ -228,6 +245,7 @@ with DAG(
 import pandas as pd
 
 path = 'data/publish/curated/predictive_anomaly_fusion.parquet'
+
 df = pd.read_parquet(path)
 
 required = [
@@ -255,6 +273,11 @@ if df[required].isna().any().any():
         'Required fusion fields contain missing values.'
     )
 
+if not df['predicted_probability'].between(0, 1).all():
+    raise ValueError(
+        'Predictive probabilities must be between 0 and 1.'
+    )
+
 print('Predictive fusion validation: OK')
 print('Rows:', len(df))
 print(
@@ -270,7 +293,7 @@ print(
     )
 
     # ------------------------------------------------------------------
-    # 8.6.5 S3 publication
+    # Phase 8: Predictive fusion S3 publication
     # ------------------------------------------------------------------
 
     publish_predictive_anomaly_fusion = LocalFilesystemToS3Operator(
@@ -352,6 +375,7 @@ print(
         >> upsert_sensor_metrics
         >> validate_metric_load
         >> validate_reference_data
+        >> validate_lake_quality
         >> run_anomaly_detection
         >> validate_anomaly_results
         >> run_localization
@@ -360,10 +384,10 @@ print(
         >> run_production_predictive_scoring
         >> run_production_fusion
         >> validate_predictive_fusion
+        >> publish_predictive_anomaly_fusion
     )
 
-    validate_predictive_fusion >> publish_predictive_anomaly_fusion
-
+    # Existing curated datasets are published after curated export.
     run_curated_export >> [
         publish_anomaly_results,
         publish_network_links,
