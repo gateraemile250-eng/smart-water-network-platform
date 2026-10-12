@@ -65,10 +65,15 @@ services:
 
     environment:
       <<: *airflow-environment
+      AWS_DEFAULT_REGION: eu-north-1
+      AIRFLOW_CONN_AWS_DEFAULT: "aws:///?region_name=eu-north-1"
 
     volumes:
       - ./dags:/opt/airflow/dags
       - airflow_logs:/opt/airflow/logs
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${USERPROFILE}/.aws:/home/airflow/.aws:ro
+      - "${SMART_WATER_PROJECT_PATH}:/opt/project"
 
     command: api-server
 

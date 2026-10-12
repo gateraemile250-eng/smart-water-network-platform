@@ -1,0 +1,7 @@
+FROM smart-water-ml:latest
+
+COPY requirements-dev.txt /tmp/requirements-dev.txt
+
+RUN pip install --no-cache-dir -r /tmp/requirements-dev.txt
+
+ENV PYTHONPATH=/opt/project

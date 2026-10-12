@@ -13,35 +13,31 @@ from airflow.providers.standard.operators.bash import BashOperator
 
 
 # ----------------------------------------------------------------------
-# Project configuration
+# Configuration
 # ----------------------------------------------------------------------
 
-# Absolute path of the repository on the Docker host.
-# Set in infrastructure/postgres/.env.
 PROJECT_PATH = os.environ.get("SMART_WATER_PROJECT_PATH")
 
 if not PROJECT_PATH:
     raise RuntimeError(
         "SMART_WATER_PROJECT_PATH is not set. Add it to "
-        "infrastructure/postgres/.env and recreate the Airflow containers."
+        "infrastructure/postgres/.env and recreate Airflow containers."
     )
 
-
-# AWS configuration
 AWS_CONN_ID = "aws_default"
 S3_BUCKET = "smart-water-lake-453914763430"
 S3_CURATED_PREFIX = "curated"
 
 
 # ----------------------------------------------------------------------
-# DAG definition
+# DAG
 # ----------------------------------------------------------------------
 
 with DAG(
     dag_id="smart_water_daily_pipeline",
     description=(
-        "Load, validate, detect anomalies, localize suspected network "
-        "areas, create validated curated datasets, and publish them to S3."
+        "Daily Smart Water pipeline with validation, anomaly detection, "
+        "localization, predictive ML, fusion, and S3 publication."
     ),
     start_date=datetime(2026, 9, 28),
     schedule="@daily",
@@ -56,14 +52,14 @@ with DAG(
         "data-quality",
         "anomaly-detection",
         "localization",
+        "predictive-ml",
         "aws",
         "s3",
-        "curated-export",
     ],
 ) as dag:
 
     # ------------------------------------------------------------------
-    # PostgreSQL connectivity
+    # PostgreSQL
     # ------------------------------------------------------------------
 
     check_postgresql = SQLExecuteQueryOperator(
@@ -71,10 +67,6 @@ with DAG(
         conn_id="smart_water_db",
         sql="SELECT 1;",
     )
-
-    # ------------------------------------------------------------------
-    # Sensor metrics
-    # ------------------------------------------------------------------
 
     upsert_sensor_metrics = SQLExecuteQueryOperator(
         task_id="upsert_sensor_metrics",
@@ -92,10 +84,6 @@ with DAG(
         """,
     )
 
-    # ------------------------------------------------------------------
-    # Reference data validation
-    # ------------------------------------------------------------------
-
     validate_reference_data = SQLCheckOperator(
         task_id="validate_reference_data",
         conn_id="smart_water_db",
@@ -108,7 +96,7 @@ with DAG(
     )
 
     # ------------------------------------------------------------------
-    # ML anomaly detection
+    # Anomaly detection
     # ------------------------------------------------------------------
 
     run_anomaly_detection = BashOperator(
@@ -179,14 +167,7 @@ with DAG(
     )
 
     # ------------------------------------------------------------------
-    # Phase 6: Curated PostgreSQL export
-    #
-    # This creates the validated Parquet datasets under:
-    #
-    # data/publish/curated/
-    #
-    # The export module performs its own quality checks and readback
-    # validation. A non-zero exit code causes this task to fail.
+    # Curated export
     # ------------------------------------------------------------------
 
     run_curated_export = BashOperator(
@@ -203,43 +184,104 @@ with DAG(
     )
 
     # ------------------------------------------------------------------
-    # Phase 6: Publish curated anomaly results to S3
+    # 8.6.1 Production predictive scoring
     # ------------------------------------------------------------------
 
-    publish_anomaly_results = LocalFilesystemToS3Operator(
-        task_id="publish_anomaly_results",
-        filename="/opt/project/data/publish/curated/"
-        "network_anomaly_results.parquet",
-        dest_key=f"{S3_CURATED_PREFIX}/network_anomaly_results.parquet",
-        dest_bucket=S3_BUCKET,
-        aws_conn_id=AWS_CONN_ID,
-        replace=True,
+    run_production_predictive_scoring = BashOperator(
+        task_id="run_production_predictive_scoring",
+        bash_command=f"""
+            docker run --rm \
+            -v "{PROJECT_PATH}:/opt/project" \
+            -w /opt/project \
+            smart-water-ml \
+            python -m src.predictive.production_scoring
+        """,
     )
 
     # ------------------------------------------------------------------
-    # Phase 6: Publish network links to S3
+    # 8.6.2 Production fusion
     # ------------------------------------------------------------------
 
-    publish_network_links = LocalFilesystemToS3Operator(
-        task_id="publish_network_links",
-        filename="/opt/project/data/publish/curated/"
-        "network_links.parquet",
-        dest_key=f"{S3_CURATED_PREFIX}/network_links.parquet",
-        dest_bucket=S3_BUCKET,
-        aws_conn_id=AWS_CONN_ID,
-        replace=True,
+    run_production_fusion = BashOperator(
+        task_id="run_production_fusion",
+        bash_command=f"""
+            docker run --rm \
+            -v "{PROJECT_PATH}:/opt/project" \
+            -w /opt/project \
+            smart-water-ml \
+            python -m src.predictive.predictive_anomaly_fusion
+        """,
     )
 
     # ------------------------------------------------------------------
-    # Phase 6: Publish localization results to S3
+    # 8.6.4 Production fusion validation
     # ------------------------------------------------------------------
 
-    publish_localization_results = LocalFilesystemToS3Operator(
-        task_id="publish_localization_results",
-        filename="/opt/project/data/publish/curated/"
-        "network_localization_results.parquet",
+    validate_predictive_fusion = BashOperator(
+        task_id="validate_predictive_fusion",
+        bash_command=f"""
+            docker run --rm \
+            -v "{PROJECT_PATH}:/opt/project" \
+            -w /opt/project \
+            smart-water-ml \
+            python -c "
+import pandas as pd
+
+path = 'data/publish/curated/predictive_anomaly_fusion.parquet'
+df = pd.read_parquet(path)
+
+required = [
+    'event_time',
+    'predicted_probability',
+    'predicted_leakage',
+    'is_baseline_anomaly',
+    'is_ml_anomaly',
+    'intelligence_state',
+]
+
+missing = [c for c in required if c not in df.columns]
+
+if missing:
+    raise ValueError(f'Missing columns: {{missing}}')
+
+if df.empty:
+    raise ValueError('Predictive fusion output is empty.')
+
+if df['event_time'].duplicated().any():
+    raise ValueError('Duplicate event timestamps detected.')
+
+if df[required].isna().any().any():
+    raise ValueError(
+        'Required fusion fields contain missing values.'
+    )
+
+print('Predictive fusion validation: OK')
+print('Rows:', len(df))
+print(
+    'Required missing values:',
+    int(df[required].isna().sum().sum())
+)
+print(
+    'Duplicate timestamps:',
+    int(df['event_time'].duplicated().sum())
+)
+"
+        """,
+    )
+
+    # ------------------------------------------------------------------
+    # 8.6.5 S3 publication
+    # ------------------------------------------------------------------
+
+    publish_predictive_anomaly_fusion = LocalFilesystemToS3Operator(
+        task_id="publish_predictive_anomaly_fusion",
+        filename=(
+            "/opt/project/data/publish/curated/"
+            "predictive_anomaly_fusion.parquet"
+        ),
         dest_key=(
-            f"{S3_CURATED_PREFIX}/network_localization_results.parquet"
+            f"{S3_CURATED_PREFIX}/"
+            "predictive_anomaly_fusion.parquet"
         ),
         dest_bucket=S3_BUCKET,
         aws_conn_id=AWS_CONN_ID,
@@ -247,13 +289,54 @@ with DAG(
     )
 
     # ------------------------------------------------------------------
-    # Phase 6: Publish network nodes to S3
+    # Existing S3 publication
     # ------------------------------------------------------------------
+
+    publish_anomaly_results = LocalFilesystemToS3Operator(
+        task_id="publish_anomaly_results",
+        filename=(
+            "/opt/project/data/publish/curated/"
+            "network_anomaly_results.parquet"
+        ),
+        dest_key=f"{S3_CURATED_PREFIX}/network_anomaly_results.parquet",
+        dest_bucket=S3_BUCKET,
+        aws_conn_id=AWS_CONN_ID,
+        replace=True,
+    )
+
+    publish_network_links = LocalFilesystemToS3Operator(
+        task_id="publish_network_links",
+        filename=(
+            "/opt/project/data/publish/curated/"
+            "network_links.parquet"
+        ),
+        dest_key=f"{S3_CURATED_PREFIX}/network_links.parquet",
+        dest_bucket=S3_BUCKET,
+        aws_conn_id=AWS_CONN_ID,
+        replace=True,
+    )
+
+    publish_localization_results = LocalFilesystemToS3Operator(
+        task_id="publish_localization_results",
+        filename=(
+            "/opt/project/data/publish/curated/"
+            "network_localization_results.parquet"
+        ),
+        dest_key=(
+            f"{S3_CURATED_PREFIX}/"
+            "network_localization_results.parquet"
+        ),
+        dest_bucket=S3_BUCKET,
+        aws_conn_id=AWS_CONN_ID,
+        replace=True,
+    )
 
     publish_network_nodes = LocalFilesystemToS3Operator(
         task_id="publish_network_nodes",
-        filename="/opt/project/data/publish/curated/"
-        "network_nodes.parquet",
+        filename=(
+            "/opt/project/data/publish/curated/"
+            "network_nodes.parquet"
+        ),
         dest_key=f"{S3_CURATED_PREFIX}/network_nodes.parquet",
         dest_bucket=S3_BUCKET,
         aws_conn_id=AWS_CONN_ID,
@@ -261,7 +344,7 @@ with DAG(
     )
 
     # ------------------------------------------------------------------
-    # Task dependency chain
+    # Dependencies
     # ------------------------------------------------------------------
 
     (
@@ -274,9 +357,13 @@ with DAG(
         >> run_localization
         >> validate_localization_results
         >> run_curated_export
+        >> run_production_predictive_scoring
+        >> run_production_fusion
+        >> validate_predictive_fusion
     )
 
-    # After the curated export succeeds, publish all four datasets.
+    validate_predictive_fusion >> publish_predictive_anomaly_fusion
+
     run_curated_export >> [
         publish_anomaly_results,
         publish_network_links,
