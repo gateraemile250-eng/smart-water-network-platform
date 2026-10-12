@@ -2,12 +2,19 @@ import os
 from datetime import datetime, timedelta
 
 from airflow.sdk import DAG
+from airflow.providers.amazon.aws.transfers.local_to_s3 import (
+    LocalFilesystemToS3Operator,
+)
 from airflow.providers.common.sql.operators.sql import (
     SQLCheckOperator,
     SQLExecuteQueryOperator,
 )
 from airflow.providers.standard.operators.bash import BashOperator
 
+
+# ----------------------------------------------------------------------
+# Project configuration
+# ----------------------------------------------------------------------
 
 # Absolute path of the repository on the Docker host.
 # Set in infrastructure/postgres/.env.
@@ -20,11 +27,21 @@ if not PROJECT_PATH:
     )
 
 
+# AWS configuration
+AWS_CONN_ID = "aws_default"
+S3_BUCKET = "smart-water-lake-453914763430"
+S3_CURATED_PREFIX = "curated"
+
+
+# ----------------------------------------------------------------------
+# DAG definition
+# ----------------------------------------------------------------------
+
 with DAG(
     dag_id="smart_water_daily_pipeline",
     description=(
-        "Load, validate, detect anomalies, and localize "
-        "suspected network areas for the Smart Water platform."
+        "Load, validate, detect anomalies, localize suspected network "
+        "areas, create validated curated datasets, and publish them to S3."
     ),
     start_date=datetime(2026, 9, 28),
     schedule="@daily",
@@ -39,14 +56,25 @@ with DAG(
         "data-quality",
         "anomaly-detection",
         "localization",
+        "aws",
+        "s3",
+        "curated-export",
     ],
 ) as dag:
+
+    # ------------------------------------------------------------------
+    # PostgreSQL connectivity
+    # ------------------------------------------------------------------
 
     check_postgresql = SQLExecuteQueryOperator(
         task_id="check_postgresql",
         conn_id="smart_water_db",
         sql="SELECT 1;",
     )
+
+    # ------------------------------------------------------------------
+    # Sensor metrics
+    # ------------------------------------------------------------------
 
     upsert_sensor_metrics = SQLExecuteQueryOperator(
         task_id="upsert_sensor_metrics",
@@ -64,6 +92,10 @@ with DAG(
         """,
     )
 
+    # ------------------------------------------------------------------
+    # Reference data validation
+    # ------------------------------------------------------------------
+
     validate_reference_data = SQLCheckOperator(
         task_id="validate_reference_data",
         conn_id="smart_water_db",
@@ -74,6 +106,10 @@ with DAG(
                 AND (SELECT COUNT(*) FROM network_links) > 0;
         """,
     )
+
+    # ------------------------------------------------------------------
+    # ML anomaly detection
+    # ------------------------------------------------------------------
 
     run_anomaly_detection = BashOperator(
         task_id="run_anomaly_detection",
@@ -101,6 +137,10 @@ with DAG(
             FROM network_anomaly_results;
         """,
     )
+
+    # ------------------------------------------------------------------
+    # Network localization
+    # ------------------------------------------------------------------
 
     run_localization = BashOperator(
         task_id="run_localization",
@@ -138,6 +178,92 @@ with DAG(
         """,
     )
 
+    # ------------------------------------------------------------------
+    # Phase 6: Curated PostgreSQL export
+    #
+    # This creates the validated Parquet datasets under:
+    #
+    # data/publish/curated/
+    #
+    # The export module performs its own quality checks and readback
+    # validation. A non-zero exit code causes this task to fail.
+    # ------------------------------------------------------------------
+
+    run_curated_export = BashOperator(
+        task_id="run_curated_export",
+        bash_command=f"""
+            docker run --rm \
+            --network smart-water-network \
+            -v "{PROJECT_PATH}:/opt/project" \
+            -e POSTGRES_HOST=smart-water-postgres \
+            -e POSTGRES_PORT=5432 \
+            smart-water-ml \
+            python -m src.cloud.curated_export
+        """,
+    )
+
+    # ------------------------------------------------------------------
+    # Phase 6: Publish curated anomaly results to S3
+    # ------------------------------------------------------------------
+
+    publish_anomaly_results = LocalFilesystemToS3Operator(
+        task_id="publish_anomaly_results",
+        filename="/opt/project/data/publish/curated/"
+        "network_anomaly_results.parquet",
+        dest_key=f"{S3_CURATED_PREFIX}/network_anomaly_results.parquet",
+        dest_bucket=S3_BUCKET,
+        aws_conn_id=AWS_CONN_ID,
+        replace=True,
+    )
+
+    # ------------------------------------------------------------------
+    # Phase 6: Publish network links to S3
+    # ------------------------------------------------------------------
+
+    publish_network_links = LocalFilesystemToS3Operator(
+        task_id="publish_network_links",
+        filename="/opt/project/data/publish/curated/"
+        "network_links.parquet",
+        dest_key=f"{S3_CURATED_PREFIX}/network_links.parquet",
+        dest_bucket=S3_BUCKET,
+        aws_conn_id=AWS_CONN_ID,
+        replace=True,
+    )
+
+    # ------------------------------------------------------------------
+    # Phase 6: Publish localization results to S3
+    # ------------------------------------------------------------------
+
+    publish_localization_results = LocalFilesystemToS3Operator(
+        task_id="publish_localization_results",
+        filename="/opt/project/data/publish/curated/"
+        "network_localization_results.parquet",
+        dest_key=(
+            f"{S3_CURATED_PREFIX}/network_localization_results.parquet"
+        ),
+        dest_bucket=S3_BUCKET,
+        aws_conn_id=AWS_CONN_ID,
+        replace=True,
+    )
+
+    # ------------------------------------------------------------------
+    # Phase 6: Publish network nodes to S3
+    # ------------------------------------------------------------------
+
+    publish_network_nodes = LocalFilesystemToS3Operator(
+        task_id="publish_network_nodes",
+        filename="/opt/project/data/publish/curated/"
+        "network_nodes.parquet",
+        dest_key=f"{S3_CURATED_PREFIX}/network_nodes.parquet",
+        dest_bucket=S3_BUCKET,
+        aws_conn_id=AWS_CONN_ID,
+        replace=True,
+    )
+
+    # ------------------------------------------------------------------
+    # Task dependency chain
+    # ------------------------------------------------------------------
+
     (
         check_postgresql
         >> upsert_sensor_metrics
@@ -147,4 +273,13 @@ with DAG(
         >> validate_anomaly_results
         >> run_localization
         >> validate_localization_results
+        >> run_curated_export
     )
+
+    # After the curated export succeeds, publish all four datasets.
+    run_curated_export >> [
+        publish_anomaly_results,
+        publish_network_links,
+        publish_localization_results,
+        publish_network_nodes,
+    ]
