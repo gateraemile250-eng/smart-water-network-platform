@@ -20,7 +20,6 @@ services:
     networks:
       - airflow-internal
 
-
   airflow-init:
     image: apache/airflow:3.3.1
     container_name: smart-water-airflow-init
@@ -51,7 +50,6 @@ services:
       - airflow-internal
       - smart-water-network
 
-
   airflow-apiserver:
     image: apache/airflow:3.3.1
     container_name: smart-water-airflow-apiserver
@@ -81,7 +79,6 @@ services:
       - airflow-internal
       - smart-water-network
 
-
   airflow-scheduler:
     image: apache/airflow:3.3.1
     container_name: smart-water-airflow-scheduler
@@ -98,6 +95,7 @@ services:
     environment:
       <<: *airflow-environment
       AWS_DEFAULT_REGION: eu-north-1
+      AIRFLOW_CONN_AWS_DEFAULT: "aws:///?region_name=eu-north-1"
 
     volumes:
       - ./dags:/opt/airflow/dags
@@ -111,7 +109,6 @@ services:
     networks:
       - airflow-internal
       - smart-water-network
-
 
   airflow-dag-processor:
     image: apache/airflow:3.3.1
@@ -139,11 +136,9 @@ services:
       - airflow-internal
       - smart-water-network
 
-
 volumes:
   smart_water_airflow_db:
   airflow_logs:
-
 
 networks:
   airflow-internal:
