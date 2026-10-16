@@ -1,28 +1,27 @@
-# Phase 10 — Databricks Validation
+# Phase 10 — Databricks Lakehouse Integration
 
 ## 1. Overview
 
-Phase 10 validates the Databricks component of the Smart Water Network Platform and documents its intended integration with the AWS S3 data lake.
+Phase 10 introduces and validates Databricks as an additional lakehouse
+and analytics layer within the Smart Water Network Platform.
 
-The objective of this phase is to confirm that:
+The objective of this phase is to demonstrate how Databricks, Unity
+Catalog, Delta Lake, Apache Spark, and Databricks SQL can extend the
+existing AWS-based data engineering architecture.
 
-- The Databricks workspace is available.
-- Python execution works in the Databricks environment.
-- The AWS S3 data lake target has been identified.
-- Unity Catalog is available.
-- A Unity Catalog storage credential has been created.
-- The AWS IAM role required for Databricks-to-S3 access has been configured.
-- The remaining IAM AssumeRole validation issue is documented clearly.
+Phase 10 covers:
 
----
-
-## 2. Databricks Environment
-
-The project uses Databricks as part of the cloud analytics and data engineering architecture.
-
-The Databricks workspace was successfully accessed and a Python notebook was created for Phase 10 validation.
-
-The Databricks environment successfully executed Python code, confirming that the workspace and notebook execution environment are operational.
+- Databricks workspace configuration
+- Python notebook execution
+- AWS S3 data lake integration
+- Unity Catalog
+- Unity Catalog Volumes
+- AWS IAM configuration
+- Delta Lake Bronze, Silver, and Gold layers
+- Data-quality validation
+- Daily sensor analytics
+- ML and anomaly-result integration
+- Databricks SQL analytics
 
 ### Validation Result
 
@@ -30,3 +29,7 @@ The Databricks environment successfully executed Python code, confirming that th
 Databricks workspace: CONFIGURED
 Python execution: OK
 Unity Catalog: AVAILABLE
+AWS S3 target: CONFIGURED
+AWS IAM role: CONFIGURED
+Storage credential: CONFIGURED
+Delta Lake processing: VALIDATED

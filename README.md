@@ -1,133 +1,144 @@
 # Smart Water Network Intelligence Platform
 
-An end-to-end **data engineering, machine-learning, network analytics,
-and GIS platform** for processing water-distribution sensor data,
-detecting abnormal network behaviour, interpreting sensor evidence,
-ranking candidate network assets, and presenting operational
-intelligence through an interactive dashboard.
+An end-to-end **data engineering, machine learning, geospatial, cloud and lakehouse platform** for water-distribution sensor data. It validates and stores sensor data, detects abnormal network behaviour, ranks candidate pipes for investigation, publishes quality-checked datasets to an AWS data lake, queries them with Athena, orchestrates the workflow with Airflow, and presents the results in a dashboard and a GIS project.
 
-> **Important:** This is a simulation/benchmark project using the
-> BattLeDIM 2018 / L-Town water-network dataset. It is **not a live
-> monitoring system for a real Rwandan water network**, and anomaly
-> results must not be interpreted as confirmed leaks.
+> **Important:** This is a simulation and benchmark project. It uses the public BattLeDIM 2018 / L-Town water-network dataset. It is **not a live monitoring system for a real water utility**, it is not connected to live telemetry, and anomaly or localization results must not be interpreted as confirmed leaks. Results are benchmark results, not operational KPIs.
+
+## At a glance
+
+| | |
+|---|---|
+| **Problem** | Turn raw water-network sensor data into validated, queryable, explainable analytics: detect abnormal periods, explain them with sensor evidence and point investigators to candidate pipes. |
+| **Data** | BattLeDIM 2018 SCADA data: 105,120 timestamps at 5-minute intervals, 119 sensors, about 12.5 million readings. L-Town network: 785 nodes, 909 links. |
+| **Built** | Kafka and Spark streaming ingestion demo, PostgreSQL/PostGIS serving layer, causal ML, topology-based localization, quality-gated publishing to S3, Glue Data Catalog, Athena, an 18-task Airflow workflow, a Databricks Delta Lake layer, QGIS and Streamlit. |
+| **Reliability** | Deterministic event IDs, idempotent writes, explicit quality gates, Airflow retries and validation tasks, 178 automated tests (run in Docker), Dockerized infrastructure. |
+| **Cloud** | S3 data lake, Glue Data Catalog and Athena on AWS. A complementary Databricks lakehouse (Unity Catalog, Bronze/Silver/Gold). Glue crawlers are intentionally not used. |
+| **Honest limits** | Benchmark data only. Localization is candidate ranking and is not accurate enough to name the leaking pipe. The Databricks-to-AWS IAM role was designed and documented, but its live AssumeRole validation is outstanding. |
 
 ## Contents
 
-1. [Project Overview](#1-project-overview)
+1. [Problem and scope](#1-problem-and-scope)
 2. [Architecture](#2-architecture)
-3. [Data Source and Simulation Model](#3-data-source-and-simulation-model)
-4. [Streaming Data Pipeline](#4-streaming-data-pipeline)
-5. [Network Anomaly Detection](#5-network-anomaly-detection)
-6. [Interpretation, Localization and GIS](#6-interpretation-localization-and-gis)
-7. [Operational Analytics Dashboard](#7-operational-analytics-dashboard)
-8. [Airflow Orchestration](#8-airflow-orchestration)
-9. [End-to-End Validation](#9-end-to-end-validation)
-10. [Data Quality and Testing](#10-data-quality-and-testing)
-11. [Technology Stack](#11-technology-stack)
-12. [Project Structure](#12-project-structure)
-13. [Local Setup](#13-local-setup)
-14. [Known Limitations](#14-known-limitations)
-15. [Engineering Principles](#15-engineering-principles)
-16. [Project Progress and Roadmap](#16-project-progress-and-roadmap)
-17. [Current Capabilities](#17-current-capabilities)
-18. [Reproducibility and Version Control](#18-reproducibility-and-version-control)
-19. [Author](#19-author)
+3. [Data source and network model](#3-data-source-and-network-model)
+4. [Streaming ingestion path](#4-streaming-ingestion-path)
+5. [Anomaly detection and predictive intelligence](#5-anomaly-detection-and-predictive-intelligence)
+6. [Localization and GIS](#6-localization-and-gis)
+7. [Dashboard](#7-dashboard)
+8. [Airflow orchestration](#8-airflow-orchestration)
+9. [AWS data lake and analytics](#9-aws-data-lake-and-analytics)
+10. [Databricks lakehouse](#10-databricks-lakehouse)
+11. [Data engineering reliability](#11-data-engineering-reliability)
+12. [Testing and validation](#12-testing-and-validation)
+13. [Security](#13-security)
+14. [Technology stack](#14-technology-stack)
+15. [Repository structure](#15-repository-structure)
+16. [Running the project](#16-running-the-project)
+17. [Known limitations](#17-known-limitations)
+18. [Project evolution](#18-project-evolution)
+19. [How to review this project](#19-how-to-review-this-project)
+20. [Author](#20-author)
 
-## 1. Project Overview
+## 1. Problem and scope
 
-The platform demonstrates a complete engineering workflow across
-ingestion, processing, storage, orchestration, analytics, localization,
-GIS, and presentation:
+Water utilities collect pressure, flow, tank-level and demand measurements, but raw SCADA data is not directly useful: it has to be validated, stored reliably, analysed for abnormal behaviour and presented in a form investigators can act on.
 
-```mermaid
-flowchart LR
-    subgraph A["Path A: streaming ingestion (validation replay)"]
-        SIM["Python simulator"] --> K["Kafka<br/>water-sensor-events"]
-        K --> SP["Spark Structured Streaming<br/>validate, event time, aggregate"]
-        SP --> PQ[("Parquet lake<br/>valid + rejected events")]
-        SP --> STG[("PostgreSQL<br/>staging metrics")]
-    end
+This project builds that chain end to end on a public benchmark, and it deliberately focuses on engineering quality: how the data is validated, stored, orchestrated and checked, and how limitations are reported.
 
-    subgraph B["Path B: full-year analytics"]
-        CSV[("BattLeDIM 2018<br/>SCADA CSV files")] --> AD["Anomaly detection<br/>baseline + Isolation Forest"]
-        AD --> LOC["Sensor evidence and<br/>candidate-pipe localization"]
-    end
+**What it is:** a portfolio project that demonstrates data engineering, ML, geospatial and cloud skills on realistic water-network data.
 
-    AF["Airflow daily DAG"] -. "upsert + validate" .-> STG
-    AF -. "run" .-> AD
-    AF -. "run" .-> LOC
-
-    STG --> PG[("PostgreSQL / PostGIS<br/>serving tables")]
-    AD --> PG
-    LOC --> PG
-    PG --> V["Dashboard serving views"]
-    V --> ST["Streamlit dashboard"]
-    PG --> QG["QGIS spatial view"]
-```
-
-The streaming path (A) and the analytics path (B) are **separate
-workloads**: the full-year anomaly detection reads the BattLeDIM CSV
-files directly, while the streaming path processes a controlled replay
-of the same data through Kafka and Spark. Both are described in detail
-below, and the consequences are listed under
-[Known Limitations](#14-known-limitations).
+**What it is not:** a deployed or live system, a source of operational KPIs, or a leak-confirmation tool.
 
 ## 2. Architecture
 
-### Data Paths
+### 2.1 Overall architecture
 
-| Path | Input | Processing | Output |
-|---|---|---|---|
-| **A: Streaming ingestion** | Simulated sensor events (a replay of 12 timestamps, 1,428 events) | Kafka, then Spark Structured Streaming with validation, event-time windows and a watermark | Parquet lake, PostgreSQL staging metrics, then serving metrics |
-| **B: Analytics** | Full-year BattLeDIM 2018 SCADA CSV files (105,120 timestamps x 119 sensors) | Causal feature engineering, baseline and Isolation Forest detection, sensor evidence, topology-based localization | PostgreSQL / PostGIS anomaly and localization tables |
-| **Serving** | PostgreSQL tables | Dashboard views and the QGIS view | Streamlit dashboard, QGIS project |
+![Overall architecture of the Smart Water Network Intelligence Platform: the local core platform, the AWS data lake and analytics layer, and the Databricks lakehouse layer](docs/images/smart_water_architecture.png)
 
-Apache Airflow runs a daily workflow that upserts the streaming metrics,
-validates reference data, executes the analytics path in a container
-(`smart-water-ml`), and validates every result. It does **not** start
-the simulator, Kafka or Spark; those steps are run manually
-(see [Airflow Orchestration](#8-airflow-orchestration)).
+The platform is a hybrid of three layers: a local core platform, an AWS data lake and analytics layer, and a complementary Databricks lakehouse. The detailed architectural reference is [`docs/final_architecture.md`](docs/final_architecture.md).
 
-### Architecture Illustration
+### 2.2 Two data paths
 
-![Smart Water Network Intelligence Platform
-Architecture](docs/images/smart_water_architecture.png)
+The platform has two workloads that share a PostgreSQL/PostGIS serving layer. They are not one continuously running production pipeline.
 
-*This illustration is a simplified overview. The diagram in
-[Section 1](#1-project-overview) shows the exact data paths.*
+- **Path A, streaming ingestion demo.** A Python simulator replays historical observations as events. Kafka and Spark Structured Streaming validate and aggregate them and write Parquet and PostgreSQL. The validated replay covers 12 five-minute timestamps (1,428 events).
+- **Path B, historical analytics.** Feature engineering, anomaly detection, localization and predictive scoring read the full-year BattLeDIM data directly and write their results to PostgreSQL.
 
-### Component Responsibilities
+```mermaid
+flowchart LR
+  CSV[("BattLeDIM 2018 SCADA files<br/>and L-Town network model")]
+
+  subgraph A["Path A: streaming ingestion demo (local)"]
+    SIM["Python simulator"] --> K["Kafka"] --> SP["Spark Structured Streaming<br/>micro-batch"]
+    SP --> PQ[("Parquet lake<br/>valid and rejected events")]
+    SP --> STG[("PostgreSQL<br/>staging metrics")]
+  end
+
+  subgraph B["Path B: historical analytics (local, containerized)"]
+    FE["Causal feature engineering"] --> DET["Statistical baseline<br/>and Isolation Forest"]
+    DET --> EV["Sensor evidence"] --> LOC["Topology-based<br/>candidate-pipe ranking"]
+    DET --> PRED["Predictive scoring<br/>and fusion"]
+  end
+
+  CSV --> SIM
+  CSV --> FE
+
+  PG[("PostgreSQL / PostGIS<br/>serving layer")]
+  STG --> PG
+  DET --> PG
+  LOC --> PG
+  PRED --> PG
+  PG --> ST["Streamlit dashboard"]
+  PG --> QG["QGIS spatial view"]
+
+  AF["Airflow daily DAG<br/>18 tasks"] -. orchestrates .-> PG
+  AF -. orchestrates .-> B
+
+  subgraph AWS["AWS cloud layer"]
+    S3[("S3 data lake<br/>raw, processed, curated")] --> GC["Glue Data Catalog"] --> ATH["Athena SQL"]
+  end
+
+  CSV -- "processed Parquet" --> S3
+  PG -- "quality-gated publish" --> S3
+
+  subgraph DBX["Databricks lakehouse (complementary)"]
+    VOL["Managed Unity Catalog Volume"] --> BR["Bronze"] --> SI["Silver"] --> GO["Gold"] --> DSQL["Databricks SQL"]
+  end
+
+  S3 -. "IAM role designed and documented;<br/>live validation outstanding" .-> VOL
+```
+
+### 2.3 Components
 
 | Component | Responsibility |
 |---|---|
-| Python | Sensor simulation, feature engineering, anomaly analysis, localization |
-| Apache Kafka | Streaming sensor-event ingestion |
-| Apache Spark | Validation, event-time processing, aggregation, persistence |
-| Parquet | Historical valid-event storage and rejected-event quarantine |
-| PostgreSQL | Operational, analytical, serving, anomaly, and localization data |
-| PostGIS | Network geometry and spatial serving |
-| Apache Airflow | Scheduling, orchestration, retries, and validation |
+| Python | Simulation, feature engineering, anomaly detection, localization, cloud publishing |
+| Apache Kafka | Event ingestion for the streaming demo |
+| Apache Spark | Validation, event-time processing, aggregation and persistence (Structured Streaming, run as a micro-batch job) |
+| PostgreSQL and PostGIS | Operational, analytical and spatial serving: sensor metrics, anomaly results, localization results, network geometry |
+| Parquet | Event storage, the processed sensor-readings dataset, curated exports |
+| Amazon S3 | Cloud data lake with raw, processed and curated zones |
+| AWS Glue Data Catalog | Metadata for the data-lake tables; Glue crawlers are intentionally not used |
+| Amazon Athena | Serverless SQL over the S3 data |
+| Apache Airflow | Daily orchestration, retries and validation gates |
 | scikit-learn | Isolation Forest anomaly detection |
-| Network topology | Sensor-to-network attribution and candidate-pipe ranking |
+| Databricks, Delta Lake, Unity Catalog | A complementary lakehouse layer with Bronze, Silver and Gold tables and Databricks SQL |
 | QGIS | Spatial investigation of localization results |
-| Streamlit | Interactive operational analytics dashboard |
-| Docker | Reproducible infrastructure and execution environments |
-| pytest | Automated tests for the data contract and analytical logic |
-| Git / GitHub | Version control and project publication |
+| Streamlit | Interactive dashboard |
+| Docker | Reproducible infrastructure and ML execution environment |
 
-## 3. Data Source and Simulation Model
+### 2.4 What runs where
 
-The project uses the **BattLeDIM 2018 historical dataset** together with
-the **L-Town EPANET water-distribution network model**. The dataset
-comes from the *Battle of the Leakage Detection and Isolation Methods*
-(BattLeDIM) 2020 competition; see the
-[official BattLeDIM website](http://battledim.ucy.ac.cy/) and the
-[KIOS Research BattLeDIM repository](https://github.com/KIOS-Research/BattLeDIM).
+| Layer | Where | Notes |
+|---|---|---|
+| Kafka, Spark, PostgreSQL/PostGIS, Airflow, ML, Streamlit, QGIS | Local (Docker and Windows) | The core platform |
+| S3, Glue Data Catalog, Athena | AWS | Quality-gated publication and serverless SQL |
+| Delta Lake tables, Databricks SQL | Databricks workspace | Complementary lakehouse layer |
 
-L-Town is a benchmark network and should not be interpreted as a real
-Rwandan water network.
+AWS services were chosen only where they add value. Kafka, Spark, PostgreSQL and Airflow stay local on purpose, because at this data volume managed equivalents would add cost without adding capability. Managed Kafka (MSK), Kinesis, EMR, Redshift, RDS, managed Airflow, EC2/NAT gateways and SageMaker were evaluated and deliberately not used.
 
-### SCADA Measurements
+## 3. Data source and network model
+
+The project uses the **BattLeDIM 2018 historical dataset** and the **L-Town EPANET network model**. L-Town is a benchmark network. It is not a real utility network.
 
 | Measurement | Sensors | Unit |
 |---|---:|---|
@@ -137,706 +148,361 @@ Rwandan water network.
 | Demand | 82 | L/h |
 | **Total** | **119** | |
 
-The 2018 SCADA data contains **105,120 timestamps at 5-minute
-intervals**, with 119 measurements at each timestamp, which is about
-12.5 million readings.
-
-### Network Reference Data
+The SCADA data has **105,120 timestamps at 5-minute intervals** with 119 readings at each, which gives **12,509,280 readings**.
 
 ```text
 Sensors          119
 Network nodes    785
-Network links    909
-Pipes            905
-Pump               1
-Valves             3
+Network links    909   (905 pipes, 1 pump, 3 valves)
 ```
 
-All 119 sensors are mapped to network assets. The source network uses
-the BattLeDIM/L-Town **local model coordinate system (SRID 0)**; no
-unsupported geographic CRS is assigned.
+Sensor identity is the pair (sensor type, sensor ID). A few node IDs carry both a pressure and a demand sensor, so a sensor ID alone is not unique across types.
 
-Known leakage information is kept separate from detector and
-localization inputs and is used for evaluation rather than model
-training or threshold tuning.
+**Coordinates.** The network uses the BattLeDIM/L-Town **local model coordinate system (SRID 0)**. No geographic coordinate reference system is assigned, and no geographic coordinates are invented.
 
-Raw source data is preserved unchanged and excluded from Git. See
-[Local Setup](#13-local-setup) for where to place it.
+Known leakage events are kept separate from detector and localization inputs and are used only for evaluation, not for training or threshold tuning. Raw source data is preserved unchanged and is not committed to Git.
 
-## 4. Streaming Data Pipeline
+## 4. Streaming ingestion path
 
-The Python simulator converts historical SCADA observations into
-chronological sensor events and publishes them to the Kafka topic:
+The simulator converts historical observations into chronological events and publishes them to the Kafka topic `water-sensor-events`. Each event has a deterministic ID built from sensor type, sensor ID and timestamp, so the same reading always receives the same ID.
+
+Spark Structured Streaming runs as a **micro-batch job** (not a continuously running service). It performs JSON parsing, schema and structural validation, event-time processing with a 10-minute watermark and 15-minute sensor aggregation. Valid events go to Parquet, rejected events are quarantined, and aggregated metrics go to PostgreSQL.
+
+A controlled validation replay produced:
 
 ```text
-water-sensor-events
-```
-
-### Event Contract
-
-Every event carries these fields, and the simulator and Spark both
-validate them:
-
-| Field | Description |
-|---|---|
-| `event_id` | Deterministic ID: `{sensor_type}_{sensor_id}_{YYYYMMDDTHHMMSS}` |
-| `event_time` | ISO-8601 timestamp of the measurement |
-| `sensor_id` | Sensor identifier (node or link ID) |
-| `sensor_type` | `pressure`, `flow`, `level` or `demand` |
-| `value` | Numeric measurement |
-| `unit` | `m`, `m3/h`, `m` or `L/h`, respectively |
-
-### Spark Structured Streaming
-
-Spark runs as a micro-batch job (`availableNow` trigger) and performs:
-
-```text
-Kafka ingestion
-      |
-      v
-JSON parsing
-      |
-      v
-Schema validation
-      |
-      v
-Structural validation
-      |
-      v
-Event-time processing
-      |
-      v
-10-minute watermark
-      |
-      v
-15-minute sensor aggregation
-      |
-      +-------------> Parquet
-      |
-      v
-PostgreSQL persistence
-```
-
-A controlled validation replay processed:
-
-```text
-1,428 sensor events
-1,428 valid historical events
+1,428 sensor events (12 timestamps x 119 sensors)
+1,428 valid events
 0 rejected events
-476 staging metrics
-476 serving metrics
+476 staging metrics and 476 serving metrics (4 windows x 119 sensors)
 ```
 
-Repeated serving-layer execution remained at **476 records**,
-demonstrating idempotent persistence for the validated workload.
+Repeated serving-layer execution stayed at 476 records, which demonstrates idempotent persistence for this workload. The Parquet lake also de-duplicates by event ID before appending, so replaying the simulator does not create duplicate events (see section 11).
 
-### Idempotent Parquet Lake
+## 5. Anomaly detection and predictive intelligence
 
-Because `event_id` is deterministic, replaying the simulator or
-resetting a Spark checkpoint re-delivers identical events. Before
-appending to the Parquet lake, the Spark job removes duplicates inside
-the batch and drops events whose `event_id` is already stored, so the
-**first stored copy is kept**. This behaviour is covered by an automated
-test (see [Data Quality and Testing](#10-data-quality-and-testing)).
+Path B reads the full-year benchmark data and uses **causal** features: every value is computed from earlier observations only.
 
-## 5. Network Anomaly Detection
+### 5.1 Statistical baseline
 
-The platform includes network-level anomaly intelligence built from two
-complementary detectors. Both read the full-year BattLeDIM SCADA data
-(Path B).
+An explainable baseline based on causal weekly deviation. A sensor is abnormal when its absolute z-score is at least 3, and a network anomaly is raised when at least 15 of the 119 sensors are abnormal at the same time. Each z-score uses only earlier data, after a 7-day calibration period.
 
-### Statistical Baseline
+### 5.2 Isolation Forest
 
-The explainable baseline uses causal weekly-deviation statistics. A
-sensor is considered abnormal when:
+An unsupervised model on **357 causal features** (119 sensors x 3 feature types: 5-minute change, 1-hour change and weekly deviation). Configuration: `n_estimators = 200`, `contamination = "auto"`, `random_state = 42`. The anomaly threshold is fixed at the 99th percentile of training-period scores, without using future data or leakage labels.
 
-```text
-|z-score| >= 3
-```
+### 5.3 Evaluation against known leakage events
 
-A network anomaly is triggered when at least:
+Both detectors were evaluated against the **14 known BattLeDIM leakage events**.
 
-```text
-15 of 119 sensors
-```
-
-are simultaneously abnormal. The z-score of each observation is
-calculated from earlier observations only, after a 7-day calibration
-period.
-
-Validated result:
-
-```text
-Anomaly timestamps    1,128
-Anomaly rate           1.12%
-```
-
-### Isolation Forest
-
-The unsupervised model uses 357 causal features:
-
-```text
-119 x 5-minute changes
-119 x 1-hour changes
-119 x weekly deviations
-```
-
-Configuration:
-
-```text
-n_estimators = 200
-contamination = "auto"
-random_state = 42
-```
-
-The anomaly threshold is fixed from the **99th percentile of
-training-period scores**, without using future scoring data or leakage
-labels.
-
-Validated result:
-
-```text
-Threshold             0.521368
-Anomaly timestamps       5,897
-Anomaly rate               5.83%
-```
-
-### Ground-Truth Evaluation
-
-Both detectors were evaluated against **14 known BattLeDIM leakage
-events**.
-
-| Evaluation | Baseline | Isolation Forest |
+| Measure | Statistical baseline | Isolation Forest |
 |---|---:|---:|
 | Anomaly timestamps | 1,128 | 5,897 |
-| Anomaly rate | 1.12% | 5.83% |
-| Alert within 24 h | 8 / 14 | 13 / 14 |
+| Anomaly rate (of 101,088 scored timestamps) | 1.12% | 5.83% |
+| Alert within 24 h of a known leak | 8 / 14 | 13 / 14 |
 | Alert within 72 h | 12 / 14 | 14 / 14 |
 | Mean first-alert delay | 30.08 h | 7.10 h |
 | Median first-alert delay | 15.50 h | 4.79 h |
 | Maximum first-alert delay | 107.25 h | 33.00 h |
 
-The results demonstrate an operational trade-off between earlier warning
-and alert volume. They are not presented as evidence that one detector
-is universally superior.
+The results show a trade-off between earlier warning and alert volume. They do not show that one detector is better in general. The evaluation covers detection timing for 14 events and the overall alert rate. It does not report precision or false-alarm rates, and 14 events is a small sample, so these figures describe this benchmark and should not be read as operational performance.
 
-## 6. Interpretation, Localization and GIS
+### 5.4 Predictive scoring and fusion
 
-This layer extends anomaly detection into interpretable network
-decision support.
+The workflow also includes production predictive-scoring and fusion steps that combine predictive scores with the anomaly results. Their outputs are validated before publication, are published to the AWS data lake and are processed in the Databricks Gold layer. Unit tests cover both modules.
 
-The objective is to move from:
+## 6. Localization and GIS
 
-```text
-"An anomaly exists"
-```
+### 6.1 From detection to candidate pipes
 
-toward:
+Isolation Forest gives a network-level score but does not say which sensors caused it. The localization layer therefore uses causal statistical **sensor evidence** to identify abnormal measurements, attributes them to the network graph, and ranks pipes.
 
 ```text
-"Which sensors explain the anomaly,
-and which parts of the network should be investigated?"
+Detection  ->  Interpretation  ->  Localization (candidate ranking)
 ```
 
-### Sensor-Level Interpretation
-
-Isolation Forest provides a network-level anomaly score but does not
-directly identify the responsible sensor. The localization layer
-therefore uses causal statistical sensor evidence to identify abnormal
-measurements.
+Candidate pipes are ranked with a transparent heuristic:
 
 ```text
-Detection
-    |
-    v
-Interpretation
-    |
-    v
-Localization
+contribution = |sensor z-score| / (1 + topology distance in hops)
 ```
 
-### Sensor-to-Network Attribution
+The **Top 25 candidate pipes** are stored for each localizable ML anomaly timestamp. The ranking is an investigation aid. **It is not a probability that a pipe is leaking and it does not confirm a leak.**
 
-The physical network is represented as a graph using its nodes and
-links. The localization system implements:
+### 6.2 Results
 
-- sensor-to-node/link mapping;
-- graph construction;
-- shortest-hop distance calculation;
-- cached topology distances;
-- node/link sensor attribution.
+| Item | Result |
+|---|---:|
+| ML anomaly timestamps | 5,897 |
+| Localized anomaly timestamps | 4,868 |
+| Unlocalized ML anomaly timestamps | 1,029 |
+| Localization coverage | 82.55% |
+| Localization records (4,868 x 25) | 121,700 |
+| Distinct candidate pipes | 495 |
 
-### Candidate Pipe Localization
-
-Candidate pipes are ranked using a transparent heuristic combining
-sensor abnormality and network distance:
-
-```text
-                 |sensor z-score|
-contribution = --------------------
-                1 + topology distance
-```
-
-The system persists the **Top 25 candidate pipes** for each localizable
-ML anomaly timestamp.
-
-The ranking is an investigation aid. It is **not interpreted as the
-probability that a pipe is leaking**.
-
-### Localization Evaluation
+### 6.3 Evaluation against known leaks
 
 | Metric | Result |
 |---|---:|
 | Known leakage events | 14 |
 | Localization available | 13 / 14 |
 | Exact Top-1 matches | 0 |
-| Top-5 matches | 0 |
-| Top-10 matches | 0 |
+| Top-5 / Top-10 matches | 0 / 0 |
 | Top-25 matches | 4 |
 | Median true-pipe rank | 160 |
-| Median Rank-1 distance to true pipe | 25 network hops |
+| Median Rank-1 distance to the true pipe | 25 network hops |
 
-The evaluation shows that the current topology-weighted heuristic can
-produce candidate network assets, but it is not reliable enough for
-exact-pipe leak localization. This limitation is explicitly documented
-rather than overstating model performance.
+The heuristic produces candidate pipes, but it is **not accurate enough to identify the leaking pipe**: only 4 of the 13 evaluable leaks appear in the Top 25, and the median true pipe is ranked 160th. This limitation is reported rather than hidden.
 
-### GIS Integration
+### 6.4 GIS
 
-Localization results are joined to PostGIS network geometry through the
-QGIS serving view.
+Localization results are joined to PostGIS network geometry through a QGIS serving view. The QGIS project shows the pipe network, the candidate pipes for a chosen anomaly, candidate rank and Top-5 labels. Because the network uses local model coordinates, the map assigns no geographic CRS.
 
-The QGIS project visualizes:
+## 7. Dashboard
 
-- the complete pipe network;
-- anomaly-specific candidate pipes;
-- candidate rank;
-- Top-5 candidate labels.
+A Streamlit application on top of the PostgreSQL serving layer provides decision support for investigating the benchmark results. It reads four dedicated PostgreSQL views (`dashboard_anomaly_daily`, `dashboard_anomaly_detail`, `dashboard_localization_summary`, `dashboard_localization_candidates`) defined in `sql/06_create_dashboard_views.sql`.
 
-Because the source network uses local/model coordinates, the
-visualization intentionally avoids assigning an unsupported geographic
-CRS.
+| Page | Content |
+|---|---|
+| Network Overview | 119 sensors, 785 nodes, 909 links, 905 pipes |
+| Anomaly Monitoring | Anomaly totals and rates, baseline and ML activity, timeline, filters, evidence for a selected event |
+| Network Localization | Localized anomaly count and coverage, candidate-pipe activity, ranked candidates for a selected timestamp |
 
-### QGIS Map Preview
+Validated figures shown by the dashboard: 101,088 scored timestamps (2018-01-15 to 2018-12-31), 5,897 ML anomaly timestamps (5.83%), 1,128 baseline anomaly timestamps (1.12%) and 82.55% localization coverage. The most active day was 2018-07-19, with 76 ML anomaly timestamps (26.39% of that day's 288). These indicate periods of elevated detected anomaly activity. They do not establish the physical cause.
 
-![Smart Water Network Localization Map](gis/smart_water_localization_map.png)
+The dashboard runs locally and is **not connected to live utility telemetry**. It has **not been publicly deployed**.
 
-## 7. Operational Analytics Dashboard
+## 8. Airflow orchestration
 
-The platform includes an interactive **Streamlit operational analytics
-layer** on top of the validated PostgreSQL serving data.
+Airflow (3.3.1) runs the daily batch workflow `smart_water_daily_pipeline` for the serving, analytics and publication stages, providing orchestration, task dependencies, retries and validation gates. It does **not** run the simulator, Kafka or Spark.
 
-The dashboard is a decision-support interface rather than a replacement
-for the analytical pipeline.
+| Setting | Value |
+|---|---|
+| Schedule | `@daily`: 00:00 UTC, which is 02:00 in Rwanda |
+| Retries | 2 |
+| Retry delay | 5 minutes |
+| Catchup | Off |
 
-### Dashboard Structure
+The DAG has **18 tasks**. Validation tasks sit between stages, so publication happens only after the preceding results have been validated.
 
-```text
-Smart Water Network Intelligence
-|
-+-- Network Overview
-|   +-- 119 monitored sensors
-|   +-- 785 network nodes
-|   +-- 909 network links
-|   +-- 905 pipes
-|
-+-- Anomaly Monitoring
-|   +-- anomaly totals
-|   +-- ML anomaly rate
-|   +-- baseline anomaly activity
-|   +-- anomaly timeline
-|   +-- investigation filters
-|   +-- selected-event evidence
-|
-+-- Network Localization
-    +-- localized anomaly count
-    +-- localization coverage
-    +-- candidate-pipe activity
-    +-- selected anomaly timestamp
-    +-- ranked candidate network assets
-```
+| Stage | Tasks |
+|---|---|
+| Serving layer | PostgreSQL connectivity check; sensor-metric upsert; metric validation; reference-data validation; lake-quality validation |
+| Anomaly detection | Anomaly detection; anomaly validation |
+| Localization | Localization; localization validation |
+| Curated export | Read-only curated export to Parquet |
+| Predictive intelligence | Production predictive scoring; production fusion; predictive-fusion validation |
+| Publication to S3 | Anomaly results; localization results; network links; network nodes; predictive-fusion results |
 
-### Dashboard Serving Layer
+Task IDs are defined in `infrastructure/airflow/dags/smart_water_daily_pipeline.py`. A second DAG, `smart_water_aws_test.py`, is an AWS connectivity test. A manual run of the daily DAG was validated with **all 18 tasks successful**. The Airflow Databricks provider was integrated, but the Databricks processing in section 10 is not one of the 18 tasks.
 
-Dashboard-specific PostgreSQL views are created in:
+The DAG demonstrates orchestration, retries and validation gates over a static historical dataset. It is not an incremental production ingestion schedule.
+
+## 9. AWS data lake and analytics
+
+### 9.1 S3 data lake
 
 ```text
-sql/06_create_dashboard_views.sql
+s3://<bucket>/
+  raw/            source files as received
+  processed/      validated, typed, de-duplicated Parquet
+  curated/        analytics-ready tables
+  manifests/      publish records
+  athena-results/ Athena query output
 ```
 
-The views are:
+- **Processed sensor readings:** about **12.5 million rows** in **12 monthly Parquet files** (Snappy), about **55.5 MB** in total, partitioned as `processed/sensor_readings/year=2018/month=MM/`.
+- **Curated datasets:** anomaly results, localization results, network nodes and network links, plus the predictive-fusion results, exported from PostgreSQL and published by the Airflow publication tasks. Geometry is exported as WKT text and no SRID is added.
+- **Quality-controlled publishing:** a quality gate runs before conversion and upload (structure, timestamps, units, finite and non-negative values, completeness, duplicates). Output is read back and verified, and re-running overwrites the same keys instead of duplicating data.
 
-```text
-dashboard_anomaly_daily
-dashboard_anomaly_detail
-dashboard_localization_summary
-dashboard_localization_candidates
-```
+### 9.2 Glue Data Catalog and Athena
 
-This creates a clean serving boundary between analytical tables and
-dashboard queries.
+- The `smart_water` Glue database holds tables with explicit schemas. **Glue crawlers are intentionally not used**; schemas are known and table definitions are created through Athena DDL. The sensor-readings table is partition-aware (`year`, `month`).
+- Athena queries the catalog serverlessly using the primary workgroup, with query results written to a separate `athena-results/` location. Analyses cover sensor readings, consumption, anomalies, missing readings and operational and network KPIs. No traditional data warehouse was introduced.
+- Queries filter on the partition columns and select only the needed columns, which keeps scans small.
 
-### Validated Dashboard Results
+### 9.3 Security and cost controls
 
-#### Network
+- Authenticator-app MFA on the account, and a dedicated IAM user for command-line access with narrowly scoped S3 permissions. Credentials stay in the AWS CLI profile, outside the repository.
+- S3: Block Public Access, default encryption (SSE-S3), a bucket policy that denies non-HTTPS requests, and lifecycle rules (Athena results expire after 7 days, incomplete multipart uploads are aborted).
+- AWS Budgets alerting. The design is cost-conscious: small data volumes, serverless querying and no always-on managed services.
 
-```text
-Sensors          119
-Network nodes    785
-Network links    909
-Pipes            905
-```
+## 10. Databricks lakehouse
 
-#### Anomaly Intelligence
+Databricks is a **complementary lakehouse layer**. It does not replace the local platform or the AWS data lake. It demonstrates Unity Catalog governance, Delta Lake tables and Databricks SQL on the project's data.
 
-```text
-Scored timestamps             101,088
-ML anomaly timestamps           5,897
-ML anomaly rate                   5.83%
-Baseline anomaly timestamps      1,128
-Baseline anomaly rate              1.12%
-```
+### 10.1 What was built and validated
 
-Analysis period:
+A notebook (`notebooks/databricks/10_databricks_smart_water_validation.py`) ran in a Databricks workspace with Unity Catalog and a managed Unity Catalog Volume, and built three Delta layers.
 
-```text
-2018-01-15 -> 2018-12-31
-```
+| Layer | Content | Validated result |
+|---|---|---|
+| Bronze | Sensor events from the validated streaming replay | 1,428 records |
+| Silver | Cleaned sensor events | 1,428 records; zero null event IDs, event times, sensor IDs and sensor types |
+| Gold | Daily sensor metrics | 119 aggregated records |
+| Gold | Predictive/anomaly fusion | 1,010,888 records (documented milestone) |
 
-#### Localization Intelligence
+Databricks SQL analytics were run over the Gold data. The Bronze and Silver layers hold the small streaming-replay sample, not the full 12.5-million-row history.
 
-```text
-ML anomaly timestamps          5,897
-Localized timestamps           4,868
-Unlocalized anomalies          1,029
-Localization coverage         82.55%
-Localization records        121,700
-Distinct candidate pipes        495
-Candidates per localized event   25
-```
+### 10.2 AWS IAM integration status
 
-The dashboard includes daily anomaly activity. The highest ML anomaly
-activity in the validated daily dataset occurred on **2018-07-19**, with
-76 ML anomaly timestamps and a 26.39% daily ML anomaly rate. Other
-high-activity periods occurred during May-August 2018.
+The Databricks-to-AWS access configuration was **established and documented** in `docs/phase_11_databricks_iam.md`. It consists of:
 
-These results indicate periods of elevated detected anomaly activity.
-They do not by themselves establish the physical cause of the anomalies.
+- a dedicated AWS IAM role;
+- a Databricks storage credential;
+- a Unity Catalog trust relationship, including an external ID;
+- S3 permissions for the project's data.
 
-### Dashboard Implementation
+**Configuration is not validation.** The live Databricks-to-AWS AssumeRole path was **not successfully validated end to end**, so S3 access from Databricks must be regarded as configured and documented but unproven. The processing in section 10.1 was run on data in the managed Unity Catalog Volume. The README deliberately contains no role identifiers, and the documentation contains no credentials.
 
-```text
-dashboard/
-├── app.py
-├── app_overview.py
-├── db.py
-├── queries.py
-├── components/
-│   ├── styles.py
-│   └── __init__.py
-└── pages/
-    ├── 1_Anomaly_Monitoring.py
-    └── 2_Network_Localization.py
-```
+## 11. Data engineering reliability
 
-The application connects to PostgreSQL through SQLAlchemy and uses
-dedicated query functions for the dashboard serving views.
+| Control | How it works | Why it matters |
+|---|---|---|
+| Deterministic event IDs | ID built from sensor type, sensor and timestamp | The same reading always has the same identity, so duplicates are detectable |
+| Parquet de-duplication | The Spark job removes duplicates within a batch and drops events already stored; the first stored copy is kept | Replays and checkpoint resets cannot double the lake (a real bug found and fixed during development) |
+| Idempotent PostgreSQL writes | Upserts on natural keys | Re-running a task does not create duplicate rows |
+| Source validation | Spark and the simulator check structure, units and known sensor types; rejected events are quarantined | Bad events are isolated and not silently dropped |
+| Quality gates | Schema, nulls, finite values, known sensor types, units, non-negative values, timestamp completeness, plausible ranges (plausible-range is a warning) | Publishing fails closed when data is wrong |
+| Read-only export | The curated export runs in a read-only, repeatable-read transaction | The serving database cannot be modified by the export, and tables come from one consistent snapshot |
+| Retries and validation tasks | Two retries, five-minute delay, validation between stages | Transient failures recover and bad data stops the workflow |
+| Verification after publishing | Files are read back and compared before and after upload | Uploaded data matches what was validated |
+| Reproducible infrastructure | Docker Compose, configuration templates, setup verified from a fresh clone | Others can rebuild the local platform |
 
-### Run Locally
+## 12. Testing and validation
 
-From the project root:
+### 12.1 Automated unit and logic tests
+
+The suite in `tests/` covers the simulator data contract, feature engineering, the baseline detector, predictive scoring and fusion, the quality checks, the cloud quality gate, Parquet conversion and the read-only curated export. Tests run without AWS credentials and without a live database.
+
+In the final validation, run inside the **Docker ML test environment**, **178 pytest tests passed**, including the **18 predictive-scoring and fusion tests**.
+
+**Environment note:** the local Windows Python environment has a SciPy/scikit-learn DLL loading issue. This is an environment problem and not a failure in project logic, which is why the complete suite was run in Docker. A subset of 52 pure-Python cloud quality-gate, core quality-check and Parquet tests was also validated directly in the local environment.
+
+The final full-suite validation was run in the Docker ML test environment with:
 
 ```cmd
-streamlit run dashboard\app.py
+docker run --rm -v "%cd%:/opt/project" -w /opt/project smart-water-ml-test pytest -q
 ```
 
-The dashboard normally opens at <http://localhost:8501>.
-
-The dashboard is not yet publicly deployed (see
-[Roadmap](#16-project-progress-and-roadmap)). A public deployment can be
-added later without changing the analytical architecture, and it will
-expose the same simulated/benchmark results, not live utility-network
-telemetry.
-
-### Dashboard Preview
-
-![Smart Water Network Dashboard](docs/images/phase10/dashboard_overview.png)
-
-## 8. Airflow Orchestration
-
-The daily Airflow workflow (`smart_water_daily_pipeline`) orchestrates
-the serving, anomaly-detection, and localization steps:
+Latest result:
 
 ```text
-check_postgresql
-      |
-      v
-upsert_sensor_metrics
-      |
-      v
-validate_metric_load
-      |
-      v
-validate_reference_data
-      |
-      v
-run_anomaly_detection
-      |
-      v
-validate_anomaly_results
-      |
-      v
-run_localization
-      |
-      v
-validate_localization_results
+178 passed in 7.14s
 ```
 
-Configuration:
+The predictive-scoring and fusion modules were also validated separately with:
+
+```cmd
+docker run --rm -v "%cd%:/opt/project" -w /opt/project smart-water-ml-test pytest -q tests/test_predictive.py tests/test_predictive_fusion.py
+```
+
+Result:
 
 ```text
-schedule      @daily  (cron: 0 0 * * *)
-retries       2
-retry delay   5 minutes
-catchup       False
+18 passed in 2.69s
 ```
 
-The schedule runs at **00:00 UTC, which is 02:00 in Rwanda** (Central
-Africa Time, UTC+2).
-
-### Retry Behaviour
-
-Every task inherits two retries with a five-minute delay between
-attempts. This was exercised during testing: PostgreSQL became
-temporarily unavailable while the workflow was being tested, and after
-PostgreSQL was restored the configured retry behaviour was verified. The
-workflow's final end-to-end run completed with all eight tasks
-successful (see
-[Fresh-clone verification](#fresh-clone-verification)).
-
-### How the workflow runs
-
-- `run_anomaly_detection` and `run_localization` start the
-  `smart-water-ml` Docker image through the Docker socket mounted into
-  the Airflow scheduler. The image must be built once (see
-  [Local Setup](#13-local-setup)).
-- The host path of the repository is supplied through the
-  `SMART_WATER_PROJECT_PATH` environment variable, so no machine-specific
-  path is stored in source code.
-- The DAG begins at the metrics upsert. The simulator, Kafka and Spark
-  are started separately, because the schedule orchestrates the
-  serving and analytics steps and does not imply that Kafka itself only
-  processes data once per day.
-
-## 9. End-to-End Validation
-
-The final analytical workflow was validated through PostgreSQL and
-Airflow.
-
-| Validation | Result |
-|---|---:|
-| Anomaly rows | 101,088 |
-| ML anomaly timestamps | 5,897 |
-| Localization rows | 121,700 |
-| Localized timestamps | 4,868 |
-| Distinct candidate pipes | 495 |
-| Invalid Top-25 groups | 0 |
-| Localization without ML anomaly | 0 |
-| Missing network links | 0 |
-| Non-pipe candidates | 0 |
-| Missing geometries | 0 |
-| Duplicate timestamp/pipe pairs | 0 |
-| NULL localization scores | 0 |
-| Negative localization scores | 0 |
-| QGIS view rows | 121,700 |
-| Unique QGIS feature IDs | 121,700 |
-
-Validated analytical chain (Path B and serving):
-
-```text
-BattLeDIM SCADA CSV files
-    |
-    v
-Causal Feature Engineering
-    |
-    v
-Anomaly Detection (baseline + Isolation Forest)
-    |
-    v
-Sensor Evidence
-    |
-    v
-Topology Attribution
-    |
-    v
-Candidate Pipe Ranking
-    |
-    +-------------> PostGIS / QGIS
-    |
-    v
-Dashboard Serving Views
-    |
-    v
-Streamlit Dashboard
-```
-
-The streaming path (Path A) was validated separately, as described in
-[Section 4](#4-streaming-data-pipeline).
-
-## 10. Data Quality and Testing
-
-### Automated Tests
-
-The pytest suite covers pure-Python logic and needs no running services:
-
-| Test module | What it protects |
-|---|---|
-| `test_simulator_contract.py` | The event contract: required fields, units per sensor type, deterministic `event_id`, batch uniqueness |
-| `test_feature_engineering.py` | Time features, 5-minute, hourly and weekly lags, removal of warm-up rows |
-| `test_baseline_detector.py` | Causal z-scores (no look-ahead, a reading is excluded from its own baseline), evidence counting, pinned detection thresholds |
-| `test_quality_checks.py` | Every data-quality rule, and consistency between the quality rules, simulator and detector constants |
-
-A separate Spark test, `tests/test_lake_dedup.py`, verifies the
-idempotent Parquet write. It needs Spark, so it runs inside the Spark
-container.
-
-Install the development dependencies and run the suite from the project
-root:
+For developers using the local Python environment, the standard commands are:
 
 ```cmd
 pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-Run the Spark de-duplication test (Docker Desktop running):
+### 12.2 Spark-specific validation
 
-```cmd
-docker run --rm -v "%cd%:/opt/project:ro" -w /opt/project apache/spark:4.1.3-scala2.13-java17-python3-ubuntu /opt/spark/bin/spark-submit --conf spark.jars.ivy=/tmp/.ivy2 tests/test_lake_dedup.py
-```
+The idempotent Parquet write is verified by a separate Spark test run inside the Spark container (`tests/test_lake_dedup.py`). Its result was `lake de-duplication works (4 unique events stored)`. It needs Spark, so it is not part of the pytest run above.
 
-### Parquet Lake Quality Checks
+### 12.3 End-to-end and data-layer validation
 
-`src/data/quality_checks.py` evaluates the Parquet lake against explicit
-rules. Each rule is an **ERROR** (the run exits with code 1) or a
-**WARNING** (reported, never fails the run).
+A manual run of the daily Airflow DAG completed with all 18 tasks successful, and the PostgreSQL serving layer was then validated:
 
-| Check | Severity | What it catches |
-|---|---|---|
-| `rows_present` | ERROR | Empty lake |
-| `event_id_unique` | ERROR | Duplicate events |
-| `required_columns_not_null` | ERROR | Missing event ID, time, sensor, type, value or unit |
-| `values_finite` | ERROR | NaN or infinite readings |
-| `sensor_type_known` | ERROR | Unrecognized sensor types |
-| `unit_matches_sensor_type` | ERROR | Wrong unit for a sensor type |
-| `values_non_negative` | ERROR | Negative pressure, flow, level or demand |
-| `timestamps_complete` | ERROR | Any timestamp with fewer or more than 119 events (partial or doubled batches) |
-| `values_within_plausible_range` | WARNING | Readings above generous physical limits |
+| Check | Result |
+|---|---:|
+| Sensor metrics (staging and serving) | 476 |
+| Anomaly rows | 101,088 |
+| ML anomaly timestamps | 5,897 |
+| Baseline anomaly timestamps | 1,128 |
+| Localized anomaly timestamps | 4,868 |
+| Unlocalized ML anomaly timestamps | 1,029 |
+| Localization rows | 121,700 |
+| Network nodes / links | 785 / 909 |
+| Invalid Top-25 groups | 0 |
+| Localization without an ML anomaly | 0 |
+| Non-pipe candidates | 0 |
+| Missing network links or geometries | 0 |
+| Duplicate timestamp and pipe pairs | 0 |
+| Null or negative localization scores | 0 |
 
-The plausible-range limits (pressure 100 m, flow 500 m3/h, level 10 m,
-demand 100,000 L/h) are deliberately generous. The 2018 data peaks far
-below them, so they only flag clearly implausible readings.
+## 13. Security
 
-Run the checks (Docker Desktop running):
+- **No secrets in Git.** Environment files, AWS credentials, keys and tokens are excluded by `.gitignore` (`.env`, `*.env`, `.aws/`, `*.pem`, `*.key`). Only the template `infrastructure/postgres/.env.example` is tracked.
+- **AWS.** IAM is used as an access-control mechanism: a dedicated CLI user with scoped S3 permissions, MFA on the account, Block Public Access, encryption and HTTPS-only access on the bucket. Credentials stay in the AWS CLI profile.
+- **Final repository check.** A final check found no AWS access key, secret or other credential in tracked project content. Strings such as `AKIA` or `aws_secret_access_key` appear only inside security-check documentation and are not credentials.
+- **No account-specific identifiers in this README.** The real bucket name, account details and role identifiers are not shown here; templates use placeholders.
+- **Scope.** This is a learning project and not an enterprise security architecture. See the limitations for the Docker-socket trade-off.
 
-```cmd
-docker run --rm -v "%cd%:/opt/project:ro" -w /opt/project apache/spark:4.1.3-scala2.13-java17-python3-ubuntu /opt/spark/bin/spark-submit --conf spark.jars.ivy=/tmp/.ivy2 src/data/quality_checks.py
-```
+## 14. Technology stack
 
-A different Parquet directory can be passed as a final argument. For a
-lake without problems every check reports `[PASS]` and the run ends with
-`QUALITY CHECKS PASSED.`
-
-### Validation inside the pipeline
-
-In addition to the checks above:
-
-- Spark validates event structure and quarantines rejected events;
-- the Airflow DAG validates metrics, reference data, anomaly results and
-  localization results with SQL checks between stages;
-- SQL constraints and idempotent upserts protect the serving tables.
-
-The Parquet quality checks are currently run manually; they are not
-yet an Airflow task.
-
-## 11. Technology Stack
-
-| Technology | Role |
+| Technology | Role / version |
 |---|---|
-| Python (3.14 locally, 3.13 in the ML container) | Simulation, feature engineering, anomaly detection, localization |
-| Pandas / NumPy | Data transformation and analytical processing |
+| Python | Simulation, feature engineering, ML, localization, cloud publishing |
+| Pandas, NumPy, PyArrow | Data processing and Parquet |
 | scikit-learn | Isolation Forest |
-| Apache Kafka 4.1.1 | Streaming ingestion |
-| Apache Spark 4.1.3 | Structured streaming and aggregation |
-| PostgreSQL / PostGIS | Operational, analytical, and spatial storage |
-| Parquet | Historical event storage |
-| Apache Airflow 3.3.1 | Workflow orchestration and validation |
-| Streamlit | Operational analytics dashboard |
-| QGIS 3.44 | Network and localization visualization |
-| Docker / Docker Compose | Reproducible infrastructure |
-| pytest | Automated tests |
-| Git / GitHub | Version control and project publication |
+| Apache Kafka 4.1.1 | Event ingestion |
+| Apache Spark 4.1.3 (Structured Streaming) | Validation and aggregation |
+| PostgreSQL, PostGIS | Serving, spatial data |
+| Apache Airflow 3.3.1 | Orchestration |
+| Amazon S3, AWS Glue Data Catalog, Amazon Athena | Data lake, metadata, serverless SQL |
+| AWS IAM, AWS Budgets | Access control, cost monitoring |
+| Databricks, Delta Lake, Unity Catalog, Databricks SQL | Complementary lakehouse |
+| Streamlit | Dashboard |
+| QGIS | Spatial visualization; version not pinned in the repository |
+| Docker, Docker Compose | Infrastructure and ML execution |
+| pytest | Automated testing |
+| Git, GitHub | Version control |
 
-## 12. Project Structure
+## 15. Repository structure
 
 ```text
 Smart-water-network-platform/
-│
-├── dashboard/
-├── docs/
-│   ├── data_contract.md
-│   ├── data_understanding.md
-│   ├── project_design.md
-│   └── images/
-├── gis/
+├── dashboard/          Streamlit application and pages
+├── cloud/              AWS configuration templates (IAM policy, S3 policy and lifecycle)
+├── docs/               Architecture, data contract, AWS, Databricks and IAM documentation
+│   └── images/         Architecture diagram
+├── gis/                QGIS project and map artifacts
 ├── infrastructure/
-│   ├── airflow/          # Docker Compose file and the daily DAG
-│   ├── kafka/            # Docker Compose file
-│   ├── ml/               # Dockerfile for the smart-water-ml image
-│   ├── postgres/         # Docker Compose file and .env.example
-│   └── spark/            # run_spark_stream.cmd
-├── sql/
-│   ├── 01_create_storage_schema.sql
-│   ├── 02_upsert_sensor_metrics.sql
-│   ├── 03_create_network_anomaly_results.sql
-│   ├── 04_create_network_localization_results.sql
-│   ├── 05_create_localization_qgis_view.sql
-│   └── 06_create_dashboard_views.sql
-├── src/
-│   ├── anomaly_detection/
-│   ├── data/             # loaders, database access, Parquet validation, quality checks
-│   ├── exploration/
-│   ├── localization/
-│   ├── simulator/
-│   └── streaming/
-├── tests/
-├── .gitignore
+│   ├── airflow/        Docker Compose file and DAGs
+│   ├── kafka/
+│   ├── ml/             Dockerfile for the ML image
+│   ├── postgres/       Docker Compose file and .env.example
+│   └── spark/
+├── notebooks/databricks/   Databricks validation notebook
+├── sql/                PostgreSQL schema, procedures and views
+├── src/                Simulator, streaming, anomaly detection, localization,
+│                       predictive modules, cloud publishing and data utilities
+├── tests/              Automated tests
 ├── pytest.ini
-├── requirements.txt
-├── requirements-dev.txt
+├── requirements.txt         Core and local platform dependencies
+├── requirements-dev.txt     Test dependencies
+├── requirements-cloud.txt   PyArrow and boto3 for the cloud publishing modules
 └── README.md
 ```
 
-Runtime files, credentials, generated lake data, Spark checkpoints,
-virtual environments, and Python caches are excluded from version
-control.
+Key documents: `docs/final_architecture.md`, `docs/phase_10_databricks.md`, `docs/phase_11_databricks_iam.md`, `docs/aws-setup.md`, `docs/data-lake-layout.md`, `docs/data_contract.md`.
 
-## 13. Local Setup
+## 16. Running the project
 
-The project has been developed and validated on **Windows using Docker
-Desktop**. Other operating systems have not been tested.
+The core platform was developed and validated on **Windows with Docker Desktop**. Other operating systems have not been tested. Use **Command Prompt (`cmd`)** from the project root, because the database commands use `<` redirection.
 
-Run all commands in **Command Prompt (`cmd`)** from the project root.
-The database initialization commands use `<` redirection, which
-PowerShell does not support.
+**What you can reproduce from this repository alone:** the local platform (Kafka, Spark, PostgreSQL/PostGIS, Airflow, ML, Streamlit, QGIS). **What needs your own accounts:** the AWS publication tasks and the Databricks notebook. They require your own AWS account and Databricks workspace, configured as described in the documents under `docs/`.
 
-### Prerequisites
+### 16.1 Prerequisites
 
-- Git
-- Python (developed with 3.14)
-- Docker Desktop with Docker Compose
-- QGIS for spatial visualization (optional)
+Git, Python, Docker Desktop with Docker Compose, and QGIS (optional). The cloud publishing modules additionally need `pip install -r requirements-cloud.txt`. Download the BattLeDIM 2018 dataset from the [official BattLeDIM website](http://battledim.ucy.ac.cy/) into `data/raw/battledim/`. This folder is not committed.
 
-### 1. Clone and create a virtual environment
+### 16.2 Setup
 
 ```cmd
 git clone https://github.com/gateraemile250-eng/smart-water-network-platform.git
@@ -844,330 +510,99 @@ cd smart-water-network-platform
 python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
-```
-
-### 2. Download the BattLeDIM data
-
-Download the historical 2018 dataset from the
-[official BattLeDIM website](http://battledim.ucy.ac.cy/) and place the
-files in `data/raw/battledim/`:
-
-```text
-data/raw/battledim/
-├── 2018_SCADA_Pressures.csv
-├── 2018_SCADA_Flows.csv
-├── 2018_SCADA_Levels.csv
-├── 2018_SCADA_Demands.csv
-├── 2018_Leakages.csv
-├── 2018_Fixed_Leakages_Report.txt
-├── L-TOWN.inp
-├── dataset_configuration.yaml
-└── README.txt
-```
-
-This folder is excluded from Git, and the files must not be modified.
-
-### 3. Configure the environment
-
-Copy the template and edit the new file:
-
-```cmd
 copy infrastructure\postgres\.env.example infrastructure\postgres\.env
 ```
 
-In `infrastructure\postgres\.env`:
+Edit `infrastructure\postgres\.env`: set a database password, a random `AIRFLOW_JWT_SECRET`, and `SMART_WATER_PROJECT_PATH` to the absolute path of the repository (keep the single quotes). The real `.env` file is never committed.
 
-- set `POSTGRES_PASSWORD` to a password of your choice;
-- keep the template's `POSTGRES_USER` and `POSTGRES_DB` values unless you
-  also change the names in the `psql` commands in step 6;
-- set `AIRFLOW_JWT_SECRET` to a random value, for example the output of
-  `python -c "import secrets; print(secrets.token_hex(32))"`;
-- set `SMART_WATER_PROJECT_PATH` to the **absolute path of this
-  repository**, keeping the single quotes so backslashes stay literal,
-  for example `'C:\Users\you\Documents\smart-water-network-platform'`.
-
-The real `.env` file is excluded from Git and must never be committed.
-
-### 4. Create the shared Docker network
+### 16.3 Start the infrastructure and initialize the database
 
 ```cmd
 docker network create smart-water-network
-```
-
-### 5. Start PostgreSQL/PostGIS
-
-```cmd
 docker compose --env-file infrastructure\postgres\.env -f infrastructure\postgres\docker-compose.yml up -d
-```
-
-### 6. Initialize the database
-
-```cmd
 docker exec -i smart-water-postgres psql -U smart_water_user -d smart_water < sql\01_create_storage_schema.sql
 docker exec -i smart-water-postgres psql -U smart_water_user -d smart_water < sql\02_upsert_sensor_metrics.sql
 docker exec -i smart-water-postgres psql -U smart_water_user -d smart_water < sql\03_create_network_anomaly_results.sql
 docker exec -i smart-water-postgres psql -U smart_water_user -d smart_water < sql\04_create_network_localization_results.sql
 docker exec -i smart-water-postgres psql -U smart_water_user -d smart_water < sql\05_create_localization_qgis_view.sql
 docker exec -i smart-water-postgres psql -U smart_water_user -d smart_water < sql\06_create_dashboard_views.sql
-```
-
-### 7. Load the reference data
-
-```cmd
 python -m src.data.load_reference_data
-```
-
-### 8. Build the machine-learning image
-
-The Airflow anomaly-detection and localization tasks run in a container
-named `smart-water-ml`. Build it once, from the project root (the
-trailing `.` is the build context and is required):
-
-```cmd
 docker build -f infrastructure\ml\Dockerfile -t smart-water-ml .
 ```
 
-### 9. Start Kafka
+### 16.4 Streaming demo (Path A)
 
 ```cmd
 docker compose -f infrastructure\kafka\docker-compose.yml up -d
-```
-
-### 10. Replay the sensor data
-
-```cmd
 python -m src.simulator.sensor_simulator
-```
-
-### 11. Run Spark
-
-```cmd
 infrastructure\spark\run_spark_stream.cmd
 ```
 
-Replaying the simulator or re-running Spark is safe: the Parquet lake
-ignores events it already holds. The first run downloads the Kafka and
-JDBC connector packages, so it needs internet access and takes a few
-minutes. The download repeats on every run.
+The first Spark run downloads connector packages, so it needs internet access. Re-running the simulator or Spark is safe because the Parquet lake ignores events it already holds.
 
-### 12. Start Airflow
+### 16.5 Airflow and dashboard
 
 ```cmd
 docker compose --env-file infrastructure\postgres\.env -f infrastructure\airflow\docker-compose.yml up -d
-```
-
-The Airflow UI is published at <http://localhost:8081>. If it asks you
-to sign in, use the credentials Airflow prints in the API server logs
-(`docker logs smart-water-airflow-apiserver`). Trigger
-`smart_water_daily_pipeline` to run the serving, anomaly-detection and
-localization workflow.
-
-### 13. Run the dashboard
-
-```cmd
 streamlit run dashboard\app.py
 ```
 
-### Run the tests
+Open the Airflow UI at <http://localhost:8081> and trigger `smart_water_daily_pipeline`. The five publication tasks need AWS configured and cannot succeed without it. The dashboard opens at <http://localhost:8501>.
 
-See [Data Quality and Testing](#10-data-quality-and-testing).
+### 16.6 Tests
 
-## 14. Known Limitations
+```cmd
+pip install -r requirements-dev.txt
+python -m pytest
+```
 
-These are documented deliberately so that the project's scope is clear:
+## 17. Known limitations
 
-- **Two separate paths.** The streaming path (Kafka, Spark, Parquet)
-  does not feed the full-year analytics. Anomaly detection reads the
-  BattLeDIM CSV files directly.
-- **Ingestion is not orchestrated.** The Airflow DAG starts at the
-  metrics upsert; the simulator, Kafka and Spark are started manually.
-- **Structural validation only at the source.** The simulator and Spark
-  reject missing or malformed fields, wrong units and unknown sensor
-  types, but they do not reject NaN, infinite or negative values. The
-  Parquet quality checks flag such values after the fact.
-- **Rejected events are not de-duplicated.** Only valid events are
-  de-duplicated on `event_id`. This has no effect today because no
-  events were rejected.
-- **First copy wins.** If an `event_id` is delivered again with a
-  different value, the stored value is kept.
-- **De-duplication cost grows with the lake.** The check reads the
-  `event_id` column of the existing lake, which is inexpensive at this
-  data volume. A much larger lake would call for a table format with
-  merge support.
-- **Docker socket.** The Airflow scheduler mounts the Docker socket to
-  start the ML container. This gives it control of Docker on the host
-  and is acceptable for a local demonstration only.
-- **Secrets passed to the Spark container.** `run_spark_stream.cmd` passes
-  the whole `.env` file to the Spark container, including values it does
-  not need (such as the Airflow secret). This is acceptable for local
-  use and should be narrowed before any shared or cloud deployment.
-- **Internet required for Spark.** The connector packages are downloaded
-  on every Spark run.
-- **Quality checks are run manually.** They are not yet part of the
-  Airflow workflow.
-- **Windows only.** The project has been tested on Windows with Docker
-  Desktop.
-- **Benchmark data.** Results describe a simulated benchmark network.
-  Candidate pipes are an investigation aid, not confirmed leak
-  locations, and the localization heuristic is not reliable enough for
-  exact-pipe localization (see [Section 6](#6-interpretation-localization-and-gis)).
+- **Benchmark data.** Results describe a simulated benchmark network. They are not operational KPIs, and the platform is not connected to live telemetry.
+- **Two separate paths.** The streaming path (Kafka, Spark) does not feed the full-year analytics, which read the BattLeDIM files directly. The streaming demo is a 1,428-event replay run as a micro-batch job.
+- **Orchestration scope.** The daily DAG runs a batch workflow over a static dataset. It does not start the simulator, Kafka or Spark.
+- **Evaluation scope.** Detection is evaluated against 14 known leakage events. Precision and false-alarm rates are not reported, and the Isolation Forest flags 5.83% of timestamps.
+- **Localization accuracy.** The ranking is a transparent heuristic. Only 4 of 13 evaluable leaks fall in the Top 25, and it is not a leak probability.
+- **Databricks.** The Bronze and Silver layers hold the small replay sample. The Databricks-to-S3 AssumeRole validation is outstanding.
+- **Cloud reproducibility.** The AWS and Databricks parts need your own accounts. The AWS publication tasks cannot succeed without AWS configuration.
+- **Docker socket.** Airflow mounts the Docker socket to start the ML container. This gives the scheduler control of Docker on the host and is acceptable for local use only.
+- **Platform and deployment.** Validated on Windows with Docker Desktop only; Linux and macOS have not been tested. The dashboard runs locally and is not publicly deployed.
+- **Time-limited AWS environment.** The AWS layer runs on the AWS Free plan, which ends on 8 April 2027. After that the live cloud environment will not be available unless the account is upgraded. The configuration templates and documentation remain in the repository.
 
-## 15. Engineering Principles
+## 18. Project evolution
 
-- **Separation of responsibilities:** each platform component has a
-  defined role.
-- **Causal analytics:** anomaly features and sensor evidence avoid
-  future observations.
-- **Ground-truth separation:** leakage labels are used for evaluation
-  rather than detector/localization input or threshold tuning.
-- **Baseline before ML:** an explainable statistical detector provides
-  a reference before additional ML complexity.
-- **Evidence before claims:** anomalies are not automatically
-  classified as leaks, and candidate pipes are not presented as
-  confirmed leak locations.
-- **Idempotent persistence:** repeated analytical execution, metric
-  upserts and Parquet writes are designed to avoid duplicate records.
-- **Data-quality validation:** validation is performed between major
-  pipeline stages, on the Parquet lake, and after final persistence.
-- **Tested logic:** the data contract and analytical functions are
-  covered by automated tests.
-- **Raw-data preservation:** source datasets are not modified in
-  place.
-- **Secrets management:** credentials and machine-specific settings
-  remain in ignored environment files.
-- **Incremental architecture:** technologies are introduced only when
-  they have a clear responsibility.
-
-## 16. Project Progress and Roadmap
+The platform started as a local data-engineering project (simulator, Kafka, Spark, PostgreSQL/PostGIS, Airflow, ML, QGIS and Streamlit) and was then extended with the cloud and lakehouse layers below.
 
 | Phase | Scope | Status |
 |---|---|---|
-| 1 | Project design | Complete |
-| 2 | Data acquisition and understanding | Complete |
-| 3 | Python sensor simulator | Complete |
-| 4 | Kafka streaming ingestion | Complete |
-| 5 | Spark Structured Streaming | Complete |
-| 6 | Persistent storage | Complete |
-| 7 | Airflow orchestration and integration | Complete |
-| 8 | Network anomaly detection | Complete |
-| 9 | Anomaly interpretation, localization and GIS | Complete |
-| 10 | Operational analytics and Streamlit dashboard | Complete |
-| 11 | Foundation hardening: portable configuration, idempotent Parquet lake, automated tests, data-quality checks, documentation | Complete; verified from a fresh clone |
-| Planned | Public dashboard deployment and an optional cloud data-lake layer | Not started |
+| 1 | AWS architecture and service design | Complete |
+| 2 | AWS account safety and access control | Complete |
+| 3 | S3 data lake foundation | Complete |
+| 4 | Quality-controlled cloud publishing | Complete |
+| 5 | AWS Glue Data Catalog | Complete |
+| 6 | Amazon Athena serverless analytics | Complete |
+| 7 | Productionization, reliability and observability | Complete |
+| 8 | Advanced ML and predictive intelligence | Complete |
+| 9 | End-to-end Airflow orchestration | Complete |
+| 10 | Databricks lakehouse integration | Complete (live IAM AssumeRole validation outstanding) |
+| 11 | Final analytics product, documentation and release | Complete |
 
-### Public Dashboard
+## 19. How to review this project
 
-**Status:** not yet publicly deployed. The dashboard currently runs
-locally with `streamlit run dashboard\app.py`. A public URL will be
-added after deployment.
-
-## 17. Current Capabilities
-
-### Data Engineering
-
-- Event simulation
-- Kafka ingestion
-- Spark Structured Streaming
-- Idempotent Parquet storage
-- PostgreSQL serving
-- Airflow orchestration
-
-### Machine Learning & Analytics
-
-- Causal feature engineering
-- Statistical anomaly detection
-- Isolation Forest
-- Ground-truth evaluation
-- Sensor-level anomaly interpretation
-
-### Network Intelligence
-
-- Graph construction
-- Sensor-to-network attribution
-- Shortest-hop analysis
-- Candidate-pipe ranking
-
-### Geospatial Analytics
-
-- PostGIS network geometry
-- Spatial serving views
-- QGIS visualization
-
-### Operational Analytics
-
-- Streamlit dashboard
-- Network KPIs
-- Anomaly investigation
-- Localization investigation
-- Temporal anomaly analysis
-- PostgreSQL dashboard serving views
-
-### Engineering Quality
-
-- Dockerized execution
-- Automated tests (pytest and Spark)
-- Parquet data-quality checks
-- Idempotent persistence
-- Reproducible workflows
-- Explicit model limitations
-- Secrets exclusion
-
-## 18. Reproducibility and Version Control
-
-### Fresh-clone verification
-
-The setup in [Local Setup](#13-local-setup) was verified from a fresh
-clone of the repository, using a new virtual environment and new Docker
-volumes, on Windows with Docker Desktop:
-
-| Check | Result |
+| To check | Look at |
 |---|---|
-| `pip install -r requirements-dev.txt` and `python -m pytest` in a new virtual environment | Passed |
-| Streaming path: simulator, Kafka and Spark | 476 staging rows; Parquet quality checks passed |
-| Replaying the simulator and re-running Spark | The Parquet lake stayed at 1,428 unique events with no duplicate `event_id` |
-| Airflow DAG `smart_water_daily_pipeline` | All 8 tasks succeeded |
-| Database results | Matched the validated figures in [Section 9](#9-end-to-end-validation) exactly: 101,088 anomaly rows, 5,897 ML anomalies, 1,128 baseline anomalies, 121,700 localization rows, 4,868 localized timestamps, 495 distinct candidate pipes |
-| Streamlit dashboard | Pages loaded with the validated data |
+| Architecture | `docs/final_architecture.md` and section 2 |
+| Orchestration | `infrastructure/airflow/dags/smart_water_daily_pipeline.py` |
+| Data quality and publishing | `src/cloud/`, `src/data/quality_checks.py` and the tests in `tests/` |
+| ML and localization | `src/anomaly_detection/`, `src/localization/` |
+| Serving layer and views | `sql/` |
+| Databricks | `notebooks/databricks/` and `docs/phase_10_databricks.md` |
+| IAM design and status | `docs/phase_11_databricks_iam.md` |
 
-The verification has two limits. The BattLeDIM files were copied from an
-existing checkout instead of being downloaded, so the download step
-itself was not part of it, and only Windows with Docker Desktop was
-tested.
-
-### Version-control exclusions
-
-The repository excludes machine-specific, generated, and sensitive files
-including:
-
-```text
-.env
-.env.*
-*.env
-venv/
-__pycache__/
-*.pyc
-data/raw/
-data/lake/
-data/checkpoints/
-.aws/
-*.pem
-*.key
-```
-
-The only environment file tracked in Git is the template
-`infrastructure/postgres/.env.example`.
-
-The repository focuses on source code, infrastructure definitions, SQL,
-analytical logic, GIS configuration, dashboard code, tests, and
-documentation required to understand and reproduce the architecture.
-
-## 19. Author
+## 20. Author
 
 **GATERA Emile**
 
-Civil & Water Resources Engineer | Data Engineering & Analytics
+Civil and Water Resources Engineer | Data Engineering and Analytics
 
-This project combines water-infrastructure domain knowledge with
-practical data engineering, streaming systems, database design, workflow
-orchestration, machine learning, network analysis, geospatial analytics,
-and operational dashboard development.
+This project combines water-infrastructure domain knowledge with practical data engineering, streaming, orchestration, machine learning, geospatial analytics and cloud and lakehouse engineering.
